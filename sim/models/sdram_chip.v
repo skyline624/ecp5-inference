@@ -75,13 +75,7 @@ module sdram_chip #(
     // et copié vers le CWD de vvp par server/sim/cocotb_runner.py. Activé par
     // `-DSDRAM_PRELOAD` au build ; absent sinon (tests qui ne préchargent pas).
 `ifdef SDRAM_PRELOAD
-    initial begin
-        $display("SDRAM_PRELOAD: loading sdram_preload.hex");
-        $readmemh("sdram_preload.hex", mem);
-        $display("SDRAM_PRELOAD: loaded mem[0]=%h", mem[0]);
-    end
-`else
-    initial $display("SDRAM_PRELOAD: NOT defined (mem stays X)");
+    initial $readmemh("sdram_preload.hex", mem);
 `endif
 
     always @(posedge SDRAM_CLK) begin
