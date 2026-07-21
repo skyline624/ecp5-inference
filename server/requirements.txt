@@ -1,0 +1,9 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+vcdvcd>=2.2.7
+pyDigitalWaveTools>=0.3
+graphviz>=0.20
+# déjà installés (gardés pour reproductibilité) :
+numpy>=2.5
+cocotb>=2.0.1
+pyserial>=3.5
