@@ -24,8 +24,14 @@ env.setup()
 HERE = Path(__file__).resolve().parent
 RTL = HERE.parent.parent / "src"
 LUT = HERE.parent.parent / "lut"
-MODELS = HERE.parent.parent / "sim" / "models"
-BUILD = HERE.parent.parent / "sim" / "sim_build"
+SIM = HERE.parent.parent / "sim"
+MODELS = SIM / "models"
+BUILD = SIM / "sim_build"
+
+# cocotb doit pouvoir importer le test_module (test_gen_A.py vit dans sim/, pas
+# dans BUILD). run_cocotb.py marche car lance depuis sim/ (CWD sur sys.path) ;
+# ici on tourne depuis la racine du depot -> on ajoute sim/ explicitement.
+sys.path.insert(0, str(SIM))
 
 TOPLEVEL = "gen_seq_top"
 
@@ -72,7 +78,7 @@ def main() -> int:
             hdl_toplevel=TOPLEVEL,
             test_module=test_module,
             build_dir=str(BUILD),
-            test_dir=str(BUILD),
+            test_dir=str(SIM),
             waves=True,
         )
         print("RESULT:PASS")

@@ -20,6 +20,7 @@ $Extra = (@(
     "../src/ecp5_ecp5pll.v",
     "../src/node_top.v",
     "../src/flash_boot.v",      # autonomous W25Q64 flash->SDRAM boot (ifdef FLASH_BOOT)
+    "../src/wcache_ffn.v",       # cache FFN BRAM (instancie u_wc sous FLASH_BOOT, etape 3)
     "../src/gen_seq.v",
     "../src/async_fifo.v",
     "../src/uart_bridge.v",      # rx8_link / tx8_link (used by `top` under LINK_SS)
@@ -35,6 +36,10 @@ $Extra = (@(
     "../src/attention_head_op.v"
 ) -join ",")
 
-$args = @("-Top","gen_seq_silicon","-Extra",$Extra,"-Defines","NODE_ONLY,FLASH_BOOT")
+# CLUSTER_NODE expose clk_sys_out (PLL bump etape 1, 25->31.25 MHz) -- requis depuis
+# l'etape 1 perf : gen_seq_silicon.u_n reference le port clk_sys_out qui n'existe qu'en
+# CLUSTER_NODE. Sans ce define : yosys ERROR "Module top ... does not have a port
+# named 'clk_sys_out'".
+$args = @("-Top","gen_seq_silicon","-Extra",$Extra,"-Defines","NODE_ONLY,FLASH_BOOT,CLUSTER_NODE")
 if ($Flash) { $args += "-Flash" }
 & "$PSScriptRoot\build.ps1" @args

@@ -170,10 +170,19 @@ module top #(
     reg         sd_refresh;
     always @(posedge clk_sys) begin
         if (rst)                          refresh_cnt <= 10'd0;
+`ifdef FLASH_BOOT
         else if (eff_ref)                 refresh_cnt <= 10'd0;
+`else
+        else if (sd_refresh)              refresh_cnt <= 10'd0;
+`endif
         else if (refresh_cnt != 10'd1023) refresh_cnt <= refresh_cnt + 10'd1;
     end
 
+    // ffn_hit_q : registre cache-hit (dans ifdef FLASH_BOOT le cache FFN est actif ;
+    // hors FLASH_BOOT is_ffn_addr=0 -> reste 0 -> wbuf prend sd_dout). Declare hors
+    // ifdef car la FSM S_FM_RD/S_FM_WB le lit/ecrit dans les deux modes (icarus strict
+    // ne tolere pas l'usage-avant-declaration ; yosys tolere).
+    reg ffn_hit_q = 1'b0;
     // ---- SD-card boot loader : SD -> SDRAM at power-on, then hand over to the FSM ----
 `ifdef FLASH_BOOT
     wire        boot_done;
@@ -320,7 +329,6 @@ module top #(
     wcache_ffn u_wc (.clk(clk_sys),
                      .raddr(cache_addr), .rdata(wcache_dout),
                      .waddr(wc_waddr), .wdata(wc_wdata), .we(wc_we));
-    reg ffn_hit_q = 1'b0;     // 1 = ligne FQ courante servie par le cache BRAM
     // mux eff_* : priorite booting > wcache_filling > node
     wire [22:0] eff_addr = booting        ? boot_addr   :
                            wcache_filling ? wca_sd_addr : sd_addr;
@@ -679,6 +687,14 @@ module top #(
     // ---- Pipelined FQ/FM dot MAC (18x18->54, 3-cyc pipeline) ----
     // Dedicated instance (not shared with vec_alu2's mac18) to avoid ce/load muxing.
     // a/b = sign-extended fm_xs16/fm_ws16 ; result latched in S_FM_DOT_DRAIN.
+    // Declarations AVANT l'instance (icarus strict : usage-avant-declaration =
+    // wire implicite 1-bit + conflit "Output port expression must support
+    // continuous assignment" ; yosys tolere). Les assignations sont plus bas
+    // (apres dot_k/fm_xs16/fm_ws16) -- un assign peut suivre l'usage si la
+    // declaration precede.
+    wire               mac_ce, mac_load;
+    wire signed [17:0] mac_a, mac_b;
+    wire signed [53:0] mac_result;
     mac18 u_fm_mac (
         .clk(clk_sys), .rst(rst), .ce(mac_ce), .load(mac_load),
         .a(mac_a), .b(mac_b), .result(mac_result));
@@ -1193,11 +1209,10 @@ module top #(
     // During DRAIN we feed a=b=0 (accumulate 0 -> pipeline empties with zeros, acc unchanged).
     // load=1 only at the k=0 issue (overwrite acc to 0+a[0]*b[0]); gg_accumulate's
     // y_int32[fm_row] base is added back in S_FM_DOT_DRAIN.
-    wire               mac_ce    = (state == S_FM_DOT_ISSUE) || (state == S_FM_DOT_DRAIN);
-    wire               mac_load  = (state == S_FM_DOT_ISSUE) && (dot_k == 7'd0);
-    wire signed [17:0] mac_a     = (state == S_FM_DOT_DRAIN) ? 18'sd0 : {{2{fm_xs16[15]}}, fm_xs16};
-    wire signed [17:0] mac_b     = (state == S_FM_DOT_DRAIN) ? 18'sd0 : {{2{fm_ws16[15]}}, fm_ws16};
-    wire signed [53:0] mac_result;
+    assign             mac_ce    = (state == S_FM_DOT_ISSUE) || (state == S_FM_DOT_DRAIN);
+    assign             mac_load  = (state == S_FM_DOT_ISSUE) && (dot_k == 7'd0);
+    assign             mac_a     = (state == S_FM_DOT_DRAIN) ? 18'sd0 : {{2{fm_xs16[15]}}, fm_xs16};
+    assign             mac_b     = (state == S_FM_DOT_DRAIN) ? 18'sd0 : {{2{fm_ws16[15]}}, fm_ws16};
     reg  [1:0]         drain_cnt;
 
     assign rx_consume = rx_pending && (
