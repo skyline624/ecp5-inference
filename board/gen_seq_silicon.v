@@ -124,6 +124,21 @@ module gen_seq_silicon #(
     // it was quasi-synchronous by accident; bumping the PLL makes the separation mandatory.)
     wire clk_sys;
 
+    // wcache_fill_done : node (clk_sys) -> host (clk) synchronizer 2-FF.
+    // Le cache FFN BRAM est rempli au boot par la FSM wcache_fill (dans le node) ;
+    // start_pulse (GO) est gaté sur wcache_fill_done_s pour ne jamais lancer
+    // l'inférence avant la fin du remplissage (~36 ms one-shot au boot).
+`ifdef FLASH_BOOT
+    wire        wcache_fill_done_n;            // depuis u_n (domaine clk_sys)
+    reg         wcf_s1, wcache_fill_done_s;    // synchronise dans clk (25 MHz)
+    always @(posedge clk) begin
+        if (!rst_n) begin wcf_s1 <= 1'b0; wcache_fill_done_s <= 1'b0; end
+        else begin wcf_s1 <= wcache_fill_done_n; wcache_fill_done_s <= wcf_s1; end
+    end
+`else
+    wire        wcache_fill_done_s = 1'b1;     // pas de cache hors FLASH_BOOT : GO toujours OK
+`endif
+
     // cmd FIFO (u_cmd) : write side mux (host LOAD | gen_seq RUN) on clk, read side = node lk_rx on clk_sys
     wire [7:0] cmd_wdata;  wire cmd_wr;  wire cmd_full;
     wire [7:0] c_rdata;    wire c_empty;  wire c_rd;
@@ -335,7 +350,8 @@ module gen_seq_silicon #(
                         host_state <= H_GK;
                     end else host_state <= H_IDLE;
                 end
-                H_GK: if (ack_done) begin
+                H_GK: if (ack_done && wcache_fill_done_s) begin
+                    // GO effectif seulement une fois le cache FFN BRAM rempli (boot).
                     run_mode <= 1'b1; start_pulse <= 1'b1; host_state <= H_IDLE;
                 end
                 H_R: if (rx_valid) begin
@@ -423,7 +439,9 @@ module gen_seq_silicon #(
     // ---- the LINK_SS compute node (module `top` in node_top.v) ----
     wire [5:0] node_led;
     top #(
-        .FLASH_BASE(24'h120000), .FLASH_LEN(24'h060040), .SHIFT_BASE(24'h181000),
+        // etape 3 : bitstream cache FFN (90 BRAM) fait ~0x140000 octets > ancien FLASH_BASE
+        // 0x120000 -> chevauchait et corrompait le modele. Modele deplace @ 0x200000.
+        .FLASH_BASE(24'h200000), .FLASH_LEN(24'h060040), .SHIFT_BASE(24'h261000),
         .SHIFT_LOAD_EN(1'b1),    .SPI_HALF_DIV(10'd1)   // step 2: shifts also from flash trailer
     ) u_n (
         .clk(clk),
@@ -437,7 +455,8 @@ module gen_seq_silicon #(
         ,.flash_sck(flash_sck_int), .flash_mosi(flash_mosi),
         .flash_miso(flash_miso), .flash_cs_n(flash_cs_n),
         .flash_sck_tsen(sck_tsen),
-        .shifts_out(shifts_from_flash), .shifts_valid(shifts_valid_from_flash)
+        .shifts_out(shifts_from_flash), .shifts_valid(shifts_valid_from_flash),
+        .wcache_fill_done(wcache_fill_done_n)
 `endif
     );
     assign led = node_led;

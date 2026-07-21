@@ -126,6 +126,9 @@ module top #(
 `ifdef CLUSTER_NODE
     ,output wire       clk_sys_out     // system clock for the on-chip sequencer + inter-FPGA link
 `endif
+`ifdef FLASH_BOOT
+    ,output wire       wcache_fill_done    // 1 = cache FFN BRAM rempli (gate start_pulse cote host)
+`endif
 );
 
     localparam D = 64;
@@ -158,14 +161,16 @@ module top #(
     wire [7:0]  sd_dout;
     wire        sd_data_ready;
     wire        sd_busy;
-    // refresh : COMPTEUR SEUL. Le PULSE sd_refresh vient EXCLUSIVEMENT de la FSM
-    // principale (pattern v3). Counter reset uniquement quand sd_refresh fire reel.
+    // refresh : COMPTEUR SEUL. Le PULSE vient de eff_ref (mux = sd_refresh FSM principale
+    // | wca_refresh FSM wcache_fill | boot_ref flash_boot). Counter reset des qu'un refresh
+    // SDRAM fire reel, quel que soit l'owner du bus SDRAM (sinon wcache_fill boucle sur le
+    // refresh sans jamais lire -> fill ne termine jamais).
     reg  [9:0]  refresh_cnt = 10'd0;
     wire        refresh_due = (refresh_cnt >= 10'd472);    // ~15 us @31.25 MHz (378 cyc @25 MHz)
     reg         sd_refresh;
     always @(posedge clk_sys) begin
         if (rst)                          refresh_cnt <= 10'd0;
-        else if (sd_refresh)              refresh_cnt <= 10'd0;
+        else if (eff_ref)                 refresh_cnt <= 10'd0;
         else if (refresh_cnt != 10'd1023) refresh_cnt <= refresh_cnt + 10'd1;
     end
 
@@ -214,13 +219,123 @@ module top #(
             end
         end
     end
-    wire [22:0] eff_addr = booting ? boot_addr : sd_addr;
-    wire        eff_rd   = booting ? 1'b0     : sd_rd;
-    wire        eff_wr   = booting ? boot_wr  : sd_wr;
+    // ---- Cache FFN on-chip (BRAM 90 blocs DP16KD, 184320 octets, layout chunked 1:1) ----
+    // FSM wcache_fill : DMA SDRAM -> BRAM au boot (apres boot_done, avant GO).
+    // Decodeur is_ffn_addr + mappeur cache_addr (cote lecture, FSM FQ).
+    // sd_addr = base_l + OFF, base_l = 0x010000 + layer*0x10000 -> sd_addr[20:16]
+    // = layer+1 (1..5). FFN occupe offset intra-couche [0x3200, 0xC200).
+    localparam [22:0] WCACHE_FFN_BASE  = 23'h013200;   // debut FFN couche 0
+    localparam [15:0] WCACHE_LAYER_SZ  = 16'd36864;    // 0x9000 = 3 matrices x 3 chunks x 4096
+    localparam [2:0]  WC_NLAYERS       = 3'd5;
+    reg  [2:0]  wc_state;
+    reg  [2:0]  wca_layer;       // 0..4 (couche courante du fill)
+    reg  [15:0] wca_off;         // 0..36863 (offset intra-couche)
+    reg  [22:0] wca_sd_addr;     // source SDRAM
+    reg         wca_sd_rd;
+    reg         wca_refresh;
+    reg  [17:0] wc_waddr;        // port ecriture BRAM (compact : layer*36864 + off)
+    reg  [7:0]  wc_wdata;
+    reg         wc_we;
+    reg         wcache_fill_done_r;   // sticky : 1 une fois le cache rempli
+    assign wcache_fill_done = wcache_fill_done_r;   // port top-level (cond. FLASH_BOOT)
+    wire        wcache_filling = (wc_state != 3'd0) && !wcache_fill_done_r;
+    localparam [2:0] WC_IDLE=3'd0, WC_START=3'd1, WC_REF_CHK=3'd2,
+                     WC_RD_BUSY=3'd3, WC_RD_DONE=3'd4,
+                     WC_REF_BUSY=3'd5, WC_REF_DONE=3'd6;
+    always @(posedge clk_sys or negedge rst_n) begin
+        if (!rst_n) begin
+            wc_state <= WC_IDLE;
+`ifdef WCACHE_OFF
+            wcache_fill_done_r <= 1'b1;   // cache desactive : simule fill done (gate H_GK passe, pas de fill)
+`else
+            wcache_fill_done_r <= 1'b0;
+`endif
+            wca_layer <= 3'd0; wca_off <= 16'd0; wca_sd_addr <= 23'd0;
+            wca_sd_rd <= 1'b0; wca_refresh <= 1'b0;
+            wc_waddr <= 18'd0; wc_wdata <= 8'd0; wc_we <= 1'b0;
+        end else begin
+            // defaults : pulses 1-cycle
+            wca_sd_rd <= 1'b0; wca_refresh <= 1'b0; wc_we <= 1'b0;
+            case (wc_state)
+                WC_IDLE: begin
+                    // demarre apres le boot flash (SDRAM peuplee), une seule fois.
+                    if (boot_done && !wcache_fill_done_r) begin
+                        wca_layer  <= 3'd0; wca_off <= 16'd0;
+                        wca_sd_addr <= WCACHE_FFN_BASE;
+                        wc_state   <= WC_REF_CHK;
+                    end
+                end
+                WC_REF_CHK: begin
+                    if (refresh_due && !sd_busy) begin
+                        wca_refresh <= 1'b1;        // -> eff_ref (refresh SDRAM slippe)
+                        wc_state <= WC_REF_BUSY;
+                    end else if (!sd_busy) begin
+                        wca_sd_rd <= 1'b1;           // -> eff_rd (lit SDRAM[wca_sd_addr])
+                        wc_state <= WC_RD_BUSY;
+                    end
+                end
+                WC_RD_BUSY: if (sd_busy) wc_state <= WC_RD_DONE;
+                WC_RD_DONE: if (!sd_busy) begin
+                    // dout SDRAM valide -> ecrit dans la BRAM (compact layer*36864+off)
+                    wc_we    <= 1'b1;
+                    wc_wdata <= sd_dout;
+                    wc_waddr <= (wca_layer * 18'd36864) + {2'd0, wca_off};
+                    wca_sd_addr <= wca_sd_addr + 23'd1;
+                    if (wca_off == WCACHE_LAYER_SZ - 16'd1) begin
+                        // fin de couche -> couche suivante (saute le gap attention inter-couche)
+                        if (wca_layer == WC_NLAYERS - 3'd1) begin
+                            wcache_fill_done_r <= 1'b1;     // 5 couches faites
+                            wc_state <= WC_IDLE;
+                        end else begin
+                            wca_layer <= wca_layer + 3'd1;
+                            wca_off   <= 16'd0;
+                            // base FFN couche (L+1) = 0x013200 + (L+1)*0x10000
+                            wca_sd_addr <= WCACHE_FFN_BASE + {wca_layer + 3'd1, 16'd0};
+                            wc_state <= WC_REF_CHK;
+                        end
+                    end else begin
+                        wca_off <= wca_off + 16'd1;
+                        wc_state <= WC_REF_CHK;
+                    end
+                end
+                WC_REF_BUSY: if (sd_busy) wc_state <= WC_REF_DONE;
+                WC_REF_DONE: if (!sd_busy) wc_state <= WC_REF_CHK;
+                default: wc_state <= WC_IDLE;
+            endcase
+        end
+    end
+    // Decodeur + mappeur (lecture, cote FSM FQ). Hits actifs seulement apres fill.
+    wire [3:0]  ff_layer    = sd_addr[20:16] - 4'd1;       // 0..4 pour layers 0..4
+    wire        ff_layer_ok = (sd_addr[20:16] >= 4'd1) && (sd_addr[20:16] <= 4'd5);
+    wire        ff_off_ok   = (sd_addr[15:0] >= 16'h3200) && (sd_addr[15:0] < 16'hC200);
+`ifdef WCACHE_OFF
+    wire        is_ffn_addr = 1'b0;              // cache desactive (debug : path miss = etape 2a)
+`else
+    wire        is_ffn_addr = ff_layer_ok && ff_off_ok && wcache_fill_done_r;
+`endif
+    // cache_addr = ff_layer*36864 + (sd_addr[15:0]-0x3200) ; 36864=0x9000=2^15+2^12
+    // (shift-add dans yosys, pas de DSP). Max = 4*36864+36863 = 184319 < 2^18.
+    wire [17:0] cache_addr  = (ff_layer * 18'd36864) + (sd_addr[15:0] - 16'h3200);
+    wire [7:0]  wcache_dout;
+    wcache_ffn u_wc (.clk(clk_sys),
+                     .raddr(cache_addr), .rdata(wcache_dout),
+                     .waddr(wc_waddr), .wdata(wc_wdata), .we(wc_we));
+    reg ffn_hit_q = 1'b0;     // 1 = ligne FQ courante servie par le cache BRAM
+    // mux eff_* : priorite booting > wcache_filling > node
+    wire [22:0] eff_addr = booting        ? boot_addr   :
+                           wcache_filling ? wca_sd_addr : sd_addr;
+    wire        eff_rd   = booting        ? 1'b0        :
+                           wcache_filling ? wca_sd_rd   : sd_rd;
+    wire        eff_wr   = booting ? boot_wr : sd_wr;          // wcache_fill n'écrit pas SDRAM
     wire [7:0]  eff_din  = booting ? boot_din : sd_din;
-    wire        eff_ref  = booting ? boot_ref : sd_refresh;
+    wire        eff_ref  = booting        ? boot_ref    :
+                           wcache_filling ? wca_refresh : sd_refresh;
 `else
     wire        booting  = 1'b0;
+    wire        wcache_filling   = 1'b0;
+    wire        wcache_fill_done = 1'b0;
+    wire        is_ffn_addr      = 1'b0;
+    wire [7:0]  wcache_dout      = 8'd0;
     wire [22:0] eff_addr = sd_addr;
     wire        eff_rd   = sd_rd;
     wire        eff_wr   = sd_wr;
@@ -265,7 +380,7 @@ module top #(
 `endif
     always @(posedge clk_sys) begin
         if (rst)             rx_pending <= 1'b0;
-        else if (rx_valid && !booting) begin rx_byte <= rx_data; rx_pending <= 1'b1; end
+        else if (rx_valid && !booting && !wcache_filling) begin rx_byte <= rx_data; rx_pending <= 1'b1; end
         else if (rx_consume) rx_pending <= 1'b0;
     end
 
@@ -1624,7 +1739,16 @@ module top #(
                 S_FM_RD: begin
                     if (refresh_due && !sd_busy) begin
                         sd_refresh <= 1'b1; ret_state <= S_FM_RD; state <= S_REF_BUSY;
+                    end else if (is_ffn_addr) begin
+                        // HIT : poids FFN dans le cache BRAM -> skip SDRAM.
+                        // sd_addr stable S_FM_RD->S_FM_WB (incr en fin de WB), la BRAM
+                        // 1-cycle registered presente cache_addr ici, wcache_dout valide
+                        // au cycle suivant (S_FM_WB). ffn_hit_q registre ici (survit au
+                        // refresh qui reboucle sur S_FM_RD).
+                        ffn_hit_q  <= 1'b1;
+                        state      <= S_FM_WB;
                     end else if (!sd_busy) begin
+                        ffn_hit_q  <= 1'b0;
                         sd_rd      <= 1'b1;
                         next_state <= S_FM_WB;
                         state      <= S_OP_RD_BUSY;
@@ -1633,7 +1757,7 @@ module top #(
                 // S_FM_RDW obsolete
                 S_FM_WB: begin
                     wbuf_waddr <= {3'd0, fetch_idx};
-                    wbuf_wdata <= sd_dout;
+                    wbuf_wdata <= ffn_hit_q ? wcache_dout : sd_dout;
                     wbuf_we    <= 1'b1;
                     sd_addr    <= sd_addr + 23'd1;
                     if (fetch_idx == 7'd63) begin
