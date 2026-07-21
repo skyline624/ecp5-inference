@@ -1,0 +1,84 @@
+# colorlight_i9.lpf -- full pinout for Colorlight i9 v7.2 (LFE5U-45F-6BG381C).
+# Source: ecp5/board/colorlight_i9_v7.2.md (wuxx/Colorlight-FPGA-Projects).
+# Package: CABGA381 (BG381), speed grade -6.
+#
+# NOTE (board-tied SDRAM signals): on the i9 v7.2, CKE=VCC, CS=GND, DQM[3:0]=GND
+# are HARDWIRED on the PCB -- they have NO FPGA pin. The SDRAM controller must
+# NOT drive O_sdram_cke / O_sdram_cs_n / O_sdram_dqm on this board (leave them
+# unconnected in the ECP5 top, or tie them off internally). Only CLK, RAS, CAS,
+# WE, BA[1:0], A[10:0], DQ[31:0] reach FPGA pins. This is a step-2 bring-up item.
+
+# --- Clock (25 MHz) ---
+LOCATE COMP "clk25" SITE "P3";
+IOBUF  PORT "clk25" IO_TYPE=LVCMOS33;
+FREQUENCY PORT "clk25" 25 MHZ;
+
+# --- LED D2 ---
+LOCATE COMP "led" SITE "L2";
+IOBUF  PORT "led" IO_TYPE=LVCMOS33;
+
+# --- SDRAM (M12L64322A, 8 MB SDR, 512K x 32 x 4 banks) ---
+# CLK / control / address
+LOCATE COMP "O_sdram_clk"  SITE "B9";   IOBUF PORT "O_sdram_clk"  IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_ras_n" SITE "B10"; IOBUF PORT "O_sdram_ras_n" IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_cas_n" SITE "A9";  IOBUF PORT "O_sdram_cas_n" IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_wen_n" SITE "A10"; IOBUF PORT "O_sdram_wen_n" IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_ba[0]" SITE "B11"; IOBUF PORT "O_sdram_ba[0]" IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_ba[1]" SITE "C8";  IOBUF PORT "O_sdram_ba[1]" IO_TYPE=LVCMOS33;
+# A[10:0] = B13,C14,A16,A17,B16,B15,A14,A13,A12,A11,B12
+LOCATE COMP "O_sdram_addr[0]"  SITE "B13"; IOBUF PORT "O_sdram_addr[0]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_addr[1]"  SITE "C14"; IOBUF PORT "O_sdram_addr[1]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_addr[2]"  SITE "A16"; IOBUF PORT "O_sdram_addr[2]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_addr[3]"  SITE "A17"; IOBUF PORT "O_sdram_addr[3]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_addr[4]"  SITE "B16"; IOBUF PORT "O_sdram_addr[4]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_addr[5]"  SITE "B15"; IOBUF PORT "O_sdram_addr[5]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_addr[6]"  SITE "A14"; IOBUF PORT "O_sdram_addr[6]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_addr[7]"  SITE "A13"; IOBUF PORT "O_sdram_addr[7]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_addr[8]"  SITE "A12"; IOBUF PORT "O_sdram_addr[8]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_addr[9]"  SITE "A11"; IOBUF PORT "O_sdram_addr[9]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "O_sdram_addr[10]" SITE "B12"; IOBUF PORT "O_sdram_addr[10]" IO_TYPE=LVCMOS33;
+# DQ[31:0]
+LOCATE COMP "IO_sdram_dq[0]"  SITE "B6";  IOBUF PORT "IO_sdram_dq[0]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[1]"  SITE "A5";  IOBUF PORT "IO_sdram_dq[1]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[2]"  SITE "A6";  IOBUF PORT "IO_sdram_dq[2]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[3]"  SITE "A7";  IOBUF PORT "IO_sdram_dq[3]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[4]"  SITE "C7";  IOBUF PORT "IO_sdram_dq[4]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[5]"  SITE "B8";  IOBUF PORT "IO_sdram_dq[5]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[6]"  SITE "B5";  IOBUF PORT "IO_sdram_dq[6]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[7]"  SITE "A8";  IOBUF PORT "IO_sdram_dq[7]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[8]"  SITE "D8";  IOBUF PORT "IO_sdram_dq[8]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[9]"  SITE "D7";  IOBUF PORT "IO_sdram_dq[9]"  IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[10]" SITE "E8";  IOBUF PORT "IO_sdram_dq[10]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[11]" SITE "D6";  IOBUF PORT "IO_sdram_dq[11]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[12]" SITE "C6";  IOBUF PORT "IO_sdram_dq[12]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[13]" SITE "D5";  IOBUF PORT "IO_sdram_dq[13]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[14]" SITE "E7";  IOBUF PORT "IO_sdram_dq[14]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[15]" SITE "C5";  IOBUF PORT "IO_sdram_dq[15]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[16]" SITE "C10"; IOBUF PORT "IO_sdram_dq[16]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[17]" SITE "D9";  IOBUF PORT "IO_sdram_dq[17]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[18]" SITE "E11"; IOBUF PORT "IO_sdram_dq[18]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[19]" SITE "D11"; IOBUF PORT "IO_sdram_dq[19]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[20]" SITE "C11"; IOBUF PORT "IO_sdram_dq[20]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[21]" SITE "D12"; IOBUF PORT "IO_sdram_dq[21]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[22]" SITE "E9";  IOBUF PORT "IO_sdram_dq[22]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[23]" SITE "C12"; IOBUF PORT "IO_sdram_dq[23]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[24]" SITE "E14"; IOBUF PORT "IO_sdram_dq[24]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[25]" SITE "C15"; IOBUF PORT "IO_sdram_dq[25]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[26]" SITE "E13"; IOBUF PORT "IO_sdram_dq[26]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[27]" SITE "D15"; IOBUF PORT "IO_sdram_dq[27]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[28]" SITE "E12"; IOBUF PORT "IO_sdram_dq[28]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[29]" SITE "B17"; IOBUF PORT "IO_sdram_dq[29]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[30]" SITE "D14"; IOBUF PORT "IO_sdram_dq[30]" IO_TYPE=LVCMOS33;
+LOCATE COMP "IO_sdram_dq[31]" SITE "D13"; IOBUF PORT "IO_sdram_dq[31]" IO_TYPE=LVCMOS33;
+
+# --- SPI Flash (W25Q64JVSIQ, 8 MB) -- step 6 boot ---
+LOCATE COMP "flash_cs_n" SITE "R2"; IOBUF PORT "flash_cs_n" IO_TYPE=LVCMOS33;
+LOCATE COMP "flash_miso" SITE "V2"; IOBUF PORT "flash_miso" IO_TYPE=LVCMOS33;
+LOCATE COMP "flash_mosi" SITE "W2"; IOBUF PORT "flash_mosi" IO_TYPE=LVCMOS33;
+LOCATE COMP "flash_sck"  SITE "U3"; IOBUF PORT "flash_sck"  IO_TYPE=LVCMOS33;
+
+# --- JTAG (Ext-Board DAPLink) -- used by openFPGALoader, not in RTL ---
+# TCK=J27  TMS=J31  TDI=J32  TDO=J30
+
+# TODO step 3: UART pins (USB-serial bridge on Ext-Board -> COM3).
+# TODO step 4: PMOD pin pairs for the 2-card ss_link (8 data + 1 frame + 1 clk + GND).

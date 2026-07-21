@@ -1,0 +1,42 @@
+# ---- build artifacts (regenerable : yosys / nextpnr / ecppack / iverilog) ----
+# Extensions d'artefacts (s'applique partout, y compris dans build/ et sim/).
+# Les scripts build.ps1 / build.sh / install_toolchain.ps1 / scaffold.ps1 /
+# synth.ys et sim/Makefile sont des sources et ne matchent pas ces patterns.
+*.bit
+*.config
+*.rpt
+*.log
+*.ys.log
+*.vvp
+*.out
+*.fsto
+*.sim
+results.xml
+
+# ---- iverilog / cocotb build dirs (regenerable) ----
+sim/sim_build/
+sim/sim_build_v2/
+build/sim_build/
+**/sim_build/
+
+# ---- JSON synth reports (regenerable) ----
+# build/*.json sont des sorties nextpnr/yosys ; mais on ignore sélectivement :
+build/*.json
+
+# ---- generated test vectors ----
+sim/sim_build_v2/*.vh
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# ---- editor / OS ----
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

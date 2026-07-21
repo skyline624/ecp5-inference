@@ -1,0 +1,8 @@
+# sim artifacts + copied LUTs (regenerable)
+*.hex
+results.xml
+sim_build/
+# iverilog mac18 brick-sim artifacts (regenerable via tb_mac18.v)
+*.vvp
+mac18_log.txt
+log_*.txt

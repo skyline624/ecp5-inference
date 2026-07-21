@@ -1,0 +1,5 @@
+# matmul_test.lpf -- Gate 3 silicon test (matmul bit-exact vs Python ref).
+# On-chip data only (W/x/expected in BRAM/regs) -> just clk + LED.
+LOCATE COMP "clk25" SITE "P3";  IOBUF PORT "clk25" IO_TYPE=LVCMOS33;
+FREQUENCY PORT "clk25" 25 MHZ;
+LOCATE COMP "led" SITE "L2";  IOBUF PORT "led" IO_TYPE=LVCMOS33;

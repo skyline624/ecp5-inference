@@ -1,0 +1,16 @@
+# =============================================================================
+# synth.ys -- yosys synthesis script for ECP5 (Colorlight i9 v7.2).
+#
+# Usage (blink, Gate 1):
+#   yosys -p "tcl synth.ys" -D TOP=blink -D SRC=../board/blink.v
+#
+# Usage (full node, step 3+): set TOP=top and SRC to a list of RTL files, and
+# uncomment the attrmap line to strip stray Gowin syn_ramstyle attributes.
+# =============================================================================
+if {[info exists env(TOP)]} { set TOP $env(TOP) } else { set TOP "blink" }
+if {[info exists env(SRC)]} { set SRC $env(SRC) } else { set SRC "../board/blink.v" }
+
+read_verilog $SRC
+# Belt-and-suspenders: strip any leftover Gowin attributes when porting src/top.v.
+# attrmap -remove syn_ramstyle
+synth_ecp5 -top $TOP -json ${TOP}.json

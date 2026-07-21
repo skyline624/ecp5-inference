@@ -1,0 +1,24 @@
+# Normaliser les fins de ligne : LF dans le dépôt, conversion auto au checkout.
+* text=auto eol=lf
+
+# Sources Verilog / Python / texte -> LF (cohérent multi-OS, requis par
+# $readmemh et les scripts Python qui écrivent les .hex en LF).
+*.v    text eol=lf
+*.vh   text eol=lf
+*.sv   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.sh   text eol=lf
+*.tcl  text eol=lf
+*.ys   text eol=lf
+*.lpf  text eol=lf
+*.cst  text eol=lf
+*.hex  text eol=lf
+*.f    text eol=lf
+
+# Binaires (datasheets, images) : ne pas convertir.
+*.pdf  binary
+*.zip  binary
+*.png  binary
+*.jpg  binary
+*.bit  binary

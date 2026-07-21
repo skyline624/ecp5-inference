@@ -1,0 +1,10 @@
+# blink.lpf -- minimal constraints for Gate 1 (Hello-ECP5 blink).
+# Source of truth: ecp5/board/colorlight_i9_v7.2.md (wuxx/Colorlight-FPGA-Projects).
+# Only the 2 pins the blink top uses. Full board pinout in colorlight_i9.lpf.
+
+LOCATE COMP "clk25" SITE "P3";          # 25 MHz oscillator
+IOBUF  PORT "clk25" IO_TYPE=LVCMOS33;
+FREQUENCY PORT "clk25" 25 MHZ;
+
+LOCATE COMP "led" SITE "L2";            # LED D2 (shared with SODIMM pin 41)
+IOBUF  PORT "led" IO_TYPE=LVCMOS33;
