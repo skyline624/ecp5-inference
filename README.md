@@ -108,6 +108,19 @@ cd ecp5\build
 Gate 1 = LED D2 clignote ~1.5 Hz. Si `colorlight-i9` n'est pas listé :
 `openFPGALoader --list-boards`, fallback `--device cmsis-dap --chip LFE5U-45F`.
 
+Le flow build (`build.ps1` / `build.sh`) effectue automatiquement :
+- copie de `lut/*.hex` vers `build/` (requis par `$readmemh`, cf. piège ci-dessous) ;
+- passage de `--lpf-allow-unconstrained` à nextpnr (requis par `top.lpf` /
+  `gen_seq_silicon.lpf` qui laissent `led[4:0]` non contraints ; inoffensif pour
+  les LPF entièrement contraints). Pour le désactiver (LPF strict) :
+  `.\build.ps1 -Top <t> -NoAllowUnconstrained` (ou `STRICT=1` côté bash).
+
+Sous Git-Bash, parité avec `-Extra` :
+```bash
+./build.sh -e ../src/ecp5_ecp5pll.v pll_test flash
+./build.sh -e ../src/ecp5_ecp5pll.v,../src/sdram.v sdram_test flash
+```
+
 ## Layout
 
 ```
@@ -137,8 +150,10 @@ pour que `top.v` soit inchangé. Bug du drain : forcer `a=b=0` quand `ce=0`.
 ## Piège `$readmemh`
 
 `rmsnorm/silu/softmax/attention` chargent leurs LUT par chemin **relatif au cwd**,
-pas au fichier source. Le Makefile sim copie auto les `.hex` (`make hex`). Pour
-la synthèse : `cp ecp5/lut/*.hex ecp5/build/` avant yosys (ou `attrmap` dans synth.ys).
+pas au fichier source. Le Makefile sim copie auto les `.hex` (`make hex`).
+**`build/build.ps1` et `build/build.sh` copient désormais auto `lut/*.hex` vers
+`build/` avant yosys** — plus besoin de le faire à la main. En manuel :
+`cp lut/*.hex build/` avant yosys (ou `attrmap` dans synth.ys).
 
 ## Régénération des LUT
 

@@ -10,6 +10,9 @@
 #
 # -Extra : comma-separated list of extra Verilog files (e.g. PLL/SDRAM wrappers
 #          in ../src/) to read alongside the board top. Defaults to none.
+# -NoAllowUnconstrained : do NOT pass --lpf-allow-unconstrained to nextpnr
+#          (by default it is passed, harmless for fully-constrained LPFs but
+#          required by top.lpf / gen_seq_silicon.lpf which leave led[4:0] unused).
 #
 # Requires oss-cad-suite on PATH (yosys, nextpnr-ecp5, ecppack, openFPGALoader).
 # Package CABGA381 = BG381, speed grade 6 (LFE5U-45F-6BG381C).
@@ -19,12 +22,23 @@ param(
     [string]$Board = "colorlight-i9",
     [string]$Lpf   = "../board/$Top.lpf",
     [string]$Extra = "",
-    [switch]$Flash
+    [switch]$Flash,
+    [switch]$NoAllowUnconstrained
 )
 # Note: "Continue" (not "Stop") because nextpnr/yosys write progress to stderr,
 # and PowerShell 5.1 wraps each stderr line in an ErrorRecord -- "Stop" would
 # abort on the first Info line. Real failures are caught via $LASTEXITCODE below.
 $ErrorActionPreference = "Continue"
+
+# --- Copy LUT .hex into build/ (operators load them by cwd-relative $readmemh).
+# Without this, rmsnorm/silu/softmax/attention silently output X. Regenerable
+# via scripts/gen_*_lut.py if ../lut/*.hex are missing.
+if (Test-Path "../lut/*.hex") {
+    Copy-Item -Path "../lut/*.hex" -Destination "." -Force
+    Write-Host "==> copied LUT .hex -> build/" -ForegroundColor DarkGray
+} else {
+    Write-Warning "../lut/*.hex not found -- operator LUTs will be missing. Run scripts/regen_luts.py first."
+}
 
 $readCmd = "read_verilog ../board/$Top.v"
 if ($Extra -ne "") {
@@ -36,8 +50,10 @@ yosys -l "$Top.ys.log" -p "$readCmd; synth_ecp5 -top $Top -json $Top.json"
 if ($LASTEXITCODE -ne 0) { throw "yosys failed" }
 
 Write-Host "==> nextpnr-ecp5 (P&R)" -ForegroundColor Cyan
-nextpnr-ecp5 --package CABGA381 --speed 6 --json "$Top.json" `
-             --lpf "$Lpf" --textcfg "$Top.config" --report "$Top.rpt"
+$npArgs = @("--package","CABGA381","--speed","6","--json","$Top.json",
+            "--lpf","$Lpf","--textcfg","$Top.config","--report","$Top.rpt")
+if (-not $NoAllowUnconstrained) { $npArgs += "--lpf-allow-unconstrained" }
+& nextpnr-ecp5 @npArgs
 if ($LASTEXITCODE -ne 0) { throw "nextpnr failed" }
 
 Write-Host "==> ecppack" -ForegroundColor Cyan
