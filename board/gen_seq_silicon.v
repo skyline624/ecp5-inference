@@ -115,7 +115,16 @@ module gen_seq_silicon #(
     wire [9:0] token;  wire token_valid;  wire done;
     wire [W*D-1:0] result;  wire signed [7:0] result_sh;
 
-    // cmd FIFO (u_cmd) : write side mux (host LOAD | gen_seq RUN), read side = node lk_rx
+    // clk_sys = node system clock (PLL output, 31.25 MHz). The host FSM + UART + gen_seq
+    // run on `clk` (25 MHz crystal); the compute node runs on clk_sys. The two async_fifo
+    // below cross the clk/clk_sys boundary : the node-side port MUST be on clk_sys so the
+    // 1-cycle o_rd/o_wr pulses from rx8_link/tx8_link (clocked by clk_sys inside the node)
+    // are sampled on the same domain as the FIFO read/write port. With clk_sys != clk this
+    // is a true async crossing handled by the FIFO's Gray-pointer CDC. (At 25 MHz clk==clk_sys
+    // it was quasi-synchronous by accident; bumping the PLL makes the separation mandatory.)
+    wire clk_sys;
+
+    // cmd FIFO (u_cmd) : write side mux (host LOAD | gen_seq RUN) on clk, read side = node lk_rx on clk_sys
     wire [7:0] cmd_wdata;  wire cmd_wr;  wire cmd_full;
     wire [7:0] c_rdata;    wire c_empty;  wire c_rd;
     // resp FIFO (u_resp) : write side = node lk_tx, read side mux (gen_seq RUN | ack-drain LOAD)
@@ -141,9 +150,9 @@ module gen_seq_silicon #(
 
     async_fifo #(.DW(8), .AW(4)) u_cmd (
         .wclk(clk), .wrst_n(rst_n), .winc(cmd_wr), .wdata(cmd_wdata), .wfull(cmd_full),
-        .rclk(clk), .rrst_n(rst_n), .rinc(c_rd), .rdata(c_rdata), .rempty(c_empty));
+        .rclk(clk_sys), .rrst_n(rst_n), .rinc(c_rd), .rdata(c_rdata), .rempty(c_empty));
     async_fifo #(.DW(8), .AW(4)) u_resp (
-        .wclk(clk), .wrst_n(rst_n), .winc(r_wr), .wdata(r_wdata), .wfull(r_full),
+        .wclk(clk_sys), .wrst_n(rst_n), .winc(r_wr), .wdata(r_wdata), .wfull(r_full),
         .rclk(clk), .rrst_n(rst_n), .rinc(resp_rd), .rdata(resp_rdata), .rempty(resp_empty));
 
     // ---- Forward latch (host rx -> u_cmd) : 1-deep elastic buffer, never drops ----
@@ -418,6 +427,7 @@ module gen_seq_silicon #(
         .SHIFT_LOAD_EN(1'b1),    .SPI_HALF_DIV(10'd1)   // step 2: shifts also from flash trailer
     ) u_n (
         .clk(clk),
+        .clk_sys_out(clk_sys),
         .lk_rx_data(c_rdata), .lk_rx_empty(c_empty), .lk_rx_rd(c_rd),
         .lk_tx_data(r_wdata), .lk_tx_wr(r_wr), .lk_tx_full(r_full), .led(node_led),
         .O_sdram_clk(O_sdram_clk),

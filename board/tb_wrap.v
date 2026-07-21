@@ -74,11 +74,14 @@ module top #(parameter SD_HALF=135, parameter [15:0] SD_NBLK=769,
              parameter [23:0] SHIFT_BASE=24'h181000, parameter SHIFT_LOAD_EN=1'b1,
              parameter [9:0] SPI_HALF_DIV=10'd1) (
     input  wire        clk,
+    output wire        clk_sys_out,
     input  wire [7:0]  lk_rx_data, input wire lk_rx_empty, output wire lk_rx_rd,
     output wire [7:0]  lk_tx_data, output wire lk_tx_wr, input wire lk_tx_full,
     output wire [5:0]  led,
     output wire        O_sdram_clk, O_sdram_cas_n, O_sdram_ras_n, O_sdram_wen_n,
     inout  wire [31:0] IO_sdram_dq, output wire [10:0] O_sdram_addr, output wire [1:0] O_sdram_ba);
+    // mock node has no PLL : clk_sys_out = clk (single-clock sim, CDC not stressed).
+    assign clk_sys_out = clk;
     // header : op0 op1 a0 a1 a2 n0 n1 (7 bytes), then N data (LL consume / CC none).
     // Clean 3-phase FSM : HDR (collect 7 bytes) -> DATA (LL drain) or CC (push) ->
     // ACK (2-byte "LK"/"CK" + optional CC data). Phases are mutually exclusive.

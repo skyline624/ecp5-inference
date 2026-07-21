@@ -156,8 +156,10 @@ def main():
 
     # read the generated tokens
     print(f"Lecture de {n_emit} tokens...")
-    tokens, text = [], b""
+    tokens, text, dts = [], b"", []
+    t_gen0 = time.time()
     for i in range(n_emit):
+        t_step = time.time()
         b = ser.read(2)
         if len(b) != 2:
             print(f"FAIL: token {i} timeout, recu {len(b)} octets"); break
@@ -165,13 +167,32 @@ def main():
         tokens.append(tok)
         prev = tokens[-2] if len(tokens) >= 2 else (ids[-1] if ids else 1)
         p = decode(prev, tok, vocab); text += p
-        print(f"  tok {i:2d} = {tok:4d}  {repr(p.decode('utf-8','replace'))}")
+        dt = time.time() - t_step; dts.append(dt)
+        print(f"  tok {i:2d} = {tok:4d}  ({dt:5.2f}s)  {repr(p.decode('utf-8','replace'))}")
+    t_gen = time.time() - t_gen0
 
     print(f"\nPrompt   : {ids}")
     print(f"Genere   : {tokens}")
     print(f"Texte    : {text.decode('utf-8','replace')!r}")
     if not tokens:
         print("[FAIL] aucun token recu"); ser.close(); sys.exit(1)
+
+    # throughput : the 1st emitted token (dts[0]) carries the prefill cost
+    # (P-1 passes sans emission + la derniere passe prompt). Les dt suivants
+    # (dts[1:]) = pas de decode pur (argmax -> embed -> 5 layers -> lm_head).
+    n = len(tokens)
+    eff_rate = n / t_gen if t_gen > 0 else 0.0
+    print(f"\nTemps generation total : {t_gen:.2f}s pour {n} tokens emis "
+          f"(P={P} prefill + {n} emit sur NPOS={NPOS} positions)")
+    print(f"Debit effectif (prefill+decode) : {eff_rate:.2f} tokens/s  "
+          f"({1000/eff_rate:.0f} ms/token)" if eff_rate > 0 else
+          f"Debit effectif : n/a")
+    if n >= 2 and len(dts) >= 2:
+        decode_steps = dts[1:]               # pure decode (excludes prefill-laden tok 0)
+        med = sorted(decode_steps)[len(decode_steps) // 2]
+        avg = sum(decode_steps) / len(decode_steps)
+        print(f"Decode seul (tok 1..{n-1}) : median {med:.2f}s/token, "
+              f"moyen {avg:.2f}s/token -> {1.0/med:.2f} tokens/s (decode pur)")
 
     # alignment + PASS criterion
     # The model's nominal divergence point is oracle[10]=298 (same as the BOS

@@ -161,7 +161,7 @@ module top #(
     // refresh : COMPTEUR SEUL. Le PULSE sd_refresh vient EXCLUSIVEMENT de la FSM
     // principale (pattern v3). Counter reset uniquement quand sd_refresh fire reel.
     reg  [9:0]  refresh_cnt = 10'd0;
-    wire        refresh_due = (refresh_cnt >= 10'd378);    // ~14 us, sous limite 15 us
+    wire        refresh_due = (refresh_cnt >= 10'd472);    // ~15 us @31.25 MHz (378 cyc @25 MHz)
     reg         sd_refresh;
     always @(posedge clk_sys) begin
         if (rst)                          refresh_cnt <= 10'd0;
@@ -209,7 +209,7 @@ module top #(
         else begin
             boot_ref <= 1'b0;
             if (booting) begin
-                if (bref_cnt >= 10'd378 && !sd_busy && !boot_wr && boot_drained) begin boot_ref<=1'b1; bref_cnt<=10'd0; end
+                if (bref_cnt >= 10'd472 && !sd_busy && !boot_wr && boot_drained) begin boot_ref<=1'b1; bref_cnt<=10'd0; end
                 else if (bref_cnt != 10'd1023) bref_cnt <= bref_cnt + 10'd1;
             end
         end
@@ -228,7 +228,7 @@ module top #(
     wire        eff_ref  = sd_refresh;
 `endif
 
-    sdram #(.FREQ(25_000_000)) u_sdram (
+    sdram #(.FREQ(31_250_000)) u_sdram (
         .clk(clk_sys), .clk_sdram(clk_sdram), .resetn(rst_n),
         .addr(eff_addr), .rd(eff_rd), .wr(eff_wr), .refresh(eff_ref),
         .din(eff_din), .dout(sd_dout), .dout32(),
@@ -561,6 +561,13 @@ module top #(
         .dbg_inv_sum(dbg_attn_inv_sum)
     );
 
+    // ---- Pipelined FQ/FM dot MAC (18x18->54, 3-cyc pipeline) ----
+    // Dedicated instance (not shared with vec_alu2's mac18) to avoid ce/load muxing.
+    // a/b = sign-extended fm_xs16/fm_ws16 ; result latched in S_FM_DOT_DRAIN.
+    mac18 u_fm_mac (
+        .clk(clk_sys), .rst(rst), .ce(mac_ce), .load(mac_load),
+        .a(mac_a), .b(mac_b), .result(mac_result));
+
     // Ports FM pour driver les BSRAMs durant dot product et store
     // (declares ici, avant usage : Gowin tolere l'usage-avant-declaration,
     //  mais Icarus/Verilator creent un wire implicite 1-bit puis entrent en conflit)
@@ -722,10 +729,10 @@ module top #(
         S_FM_RD     = 7'd110,
         S_FM_RDW    = 7'd111,
         S_FM_WB     = 7'd112,    // wbuf[fetch_idx] <= sd_dout
-        S_FM_DOT_A  = 7'd113,    // addr x[k] et w[k]
-        S_FM_DOT_W1 = 7'd114,
-        S_FM_DOT_W2 = 7'd115,
-        S_FM_DOT_M  = 7'd116,    // acc += x*w
+        S_FM_DOT_ADDR  = 7'd113, // pipelined dot : amorce addr k=0 (1 cyc)
+        S_FM_DOT_ISSUE = 7'd114, // 1 elem/cycle -> mac18 (64 issues)
+        S_FM_DOT_DRAIN = 7'd115, // 3 cyc latence mac18, puis dot_acc = result
+        S_FM_DOT_M     = 7'd116, // (inutilise, reserve)
         S_FM_STORE  = 7'd117,    // ecrit y[row] (4 oct LE) in obuf
         S_FM_TX_F   = 7'd118,
         S_FM_TX_M   = 7'd119,
@@ -1064,6 +1071,19 @@ module top #(
     reg [8:0] ret_state;
     reg [8:0] next_state;
     reg [9:0] rx_idx, tx_idx;
+
+    // ---- Pipelined FQ/FM dot via mac18 (DSP) : 1 elem/cycle, ~68 cyc/line vs 256 ----
+    // ce stays high through ISSUE + DRAIN so the 3-stage pipeline drains (mac18 freezes
+    // ALL regs incl. prod_r when ce=0, so the last a[63]*b[63] would be lost otherwise).
+    // During DRAIN we feed a=b=0 (accumulate 0 -> pipeline empties with zeros, acc unchanged).
+    // load=1 only at the k=0 issue (overwrite acc to 0+a[0]*b[0]); gg_accumulate's
+    // y_int32[fm_row] base is added back in S_FM_DOT_DRAIN.
+    wire               mac_ce    = (state == S_FM_DOT_ISSUE) || (state == S_FM_DOT_DRAIN);
+    wire               mac_load  = (state == S_FM_DOT_ISSUE) && (dot_k == 7'd0);
+    wire signed [17:0] mac_a     = (state == S_FM_DOT_DRAIN) ? 18'sd0 : {{2{fm_xs16[15]}}, fm_xs16};
+    wire signed [17:0] mac_b     = (state == S_FM_DOT_DRAIN) ? 18'sd0 : {{2{fm_ws16[15]}}, fm_ws16};
+    wire signed [53:0] mac_result;
+    reg  [1:0]         drain_cnt;
 
     assign rx_consume = rx_pending && (
         state == S_IDLE     || state == S_M2_N    || state == S_M2_S   || state == S_M2_R ||
@@ -1617,34 +1637,49 @@ module top #(
                     wbuf_we    <= 1'b1;
                     sd_addr    <= sd_addr + 23'd1;
                     if (fetch_idx == 7'd63) begin
-                        // line fetched. Init dot product.
-                        // gg_accumulate=1 : start from y_int32[fm_row] (for W2 chunked sum)
+                        // line fetched -> pipelined dot via mac18 (no dot_acc init here :
+                        // mac18 load=1 overwrites acc to 0+a[0]*b[0]; gg_accumulate's
+                        // y_int32[fm_row] base is added back in S_FM_DOT_DRAIN).
                         fetch_idx <= 7'd0;
                         dot_k     <= 7'd0;
-                        dot_acc   <= gg_accumulate ? y_int32[fm_row] : 32'sd0;
-                        state     <= S_FM_DOT_A;
+                        drain_cnt <= 2'd0;
+                        state     <= S_FM_DOT_ADDR;
                     end else begin
                         fetch_idx <= fetch_idx + 7'd1;
                         state     <= S_FM_RD;
                     end
                 end
 
-                // Phase 2: dot product x[k]*w[k] sur K=64
-                S_FM_DOT_A: begin
-                    x_raddr_fm <= {3'd0, dot_k};
-                    w_raddr_fm <= {3'd0, dot_k};
-                    state      <= S_FM_DOT_W1;
+                // Phase 2: pipelined dot product x[k]*w[k] sur K=64 via mac18 (DSP).
+                // ADDR (1 cyc) : amorce addr k=0 (valeur dispo au cycle ISSUE suivant).
+                // ISSUE (64 cyc) : 1 elem/cycle, mac_ce=1, load=1 au k=0 (overwrite) puis
+                //   accumulate ; addr k+1 presentee pour la valeur du cycle suivant.
+                // DRAIN (3 cyc) : mac_ce=0, attend la latence 3 cycles du mac18, puis
+                //   dot_acc = mac_result[31:0] + (gg_accumulate ? y_int32[fm_row] : 0).
+                // Total ~68 cyc/line vs 256 (4 cyc/elem * 64).
+                S_FM_DOT_ADDR: begin
+                    x_raddr_fm <= {3'd0, 7'd0};
+                    w_raddr_fm <= {3'd0, 7'd0};
+                    drain_cnt  <= 2'd0;
+                    state      <= S_FM_DOT_ISSUE;
                 end
-                S_FM_DOT_W1: state <= S_FM_DOT_W2;
-                S_FM_DOT_W2: state <= S_FM_DOT_M;
-                S_FM_DOT_M: begin
-                    dot_acc <= dot_acc + (fm_xs16 * fm_ws16);
+                S_FM_DOT_ISSUE: begin
+                    // fm_xs16 = xbuf[dot_k] (addr set previous cycle), fed to mac18 this cycle
+                    x_raddr_fm <= {3'd0, dot_k + 7'd1};   // prefetch k+1 for next cycle
+                    w_raddr_fm <= {3'd0, dot_k + 7'd1};
                     if (dot_k == 7'd63) begin
-                        fetch_idx <= 7'd0;     // reuse comme byte index pour store
-                        state <= S_FM_STORE;
+                        state <= S_FM_DOT_DRAIN;          // 64th issue done, mac_ce drops next cyc
                     end else begin
                         dot_k <= dot_k + 7'd1;
-                        state <= S_FM_DOT_A;
+                    end
+                end
+                S_FM_DOT_DRAIN: begin
+                    if (drain_cnt == 2'd2) begin
+                        dot_acc <= mac_result[31:0] + (gg_accumulate ? y_int32[fm_row] : 32'sd0);
+                        fetch_idx <= 7'd0;                // reuse comme byte index pour store
+                        state <= S_FM_STORE;
+                    end else begin
+                        drain_cnt <= drain_cnt + 2'd1;
                     end
                 end
 
