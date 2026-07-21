@@ -8,8 +8,8 @@
 `define LINK_SS
 
 // ---- MOCK gen_seq : after a 1-cycle start, emits token_valid with a fixed token ----
-// sequence (captures sw_* on start so the testbench can check the SH latch).
-module gen_seq #(parameter W=8, parameter D=64, parameter NL=5, parameter NPOS=17) (
+// sequence (captures sw_* and prompt on start so the testbench can check SH + PR).
+module gen_seq #(parameter W=8, parameter D=64, parameter NL=5, parameter NPOS=17, parameter NPR=16) (
     input  wire           clk, rst_n, start, gen_mode,
     input  wire [W*D-1:0]  x_in,
     input  wire signed [7:0] sx_in,
@@ -17,6 +17,8 @@ module gen_seq #(parameter W=8, parameter D=64, parameter NL=5, parameter NPOS=1
     input  wire signed [7:0] sw_rmsfinal, sw_emb,
     input  wire [5:0]      pos,
     input  wire [22:0]     base,
+    input  wire [NPR*10-1:0] prompt,
+    input  wire [6:0]        prompt_len,
     output wire [7:0]      lk_cmd_data,
     output wire            lk_cmd_wr,
     input  wire            lk_cmd_full,
@@ -29,20 +31,23 @@ module gen_seq #(parameter W=8, parameter D=64, parameter NL=5, parameter NPOS=1
     output reg             token_valid,
     output reg             done
 );
-    // capture shifts at start (testbench inspects them hierarchically)
+    // capture shifts + prompt at start (testbench inspects them hierarchically)
     reg [NL*8-1:0] cap_rms, cap_q, cap_k, cap_v, cap_o, cap_rmsf, cap_1, cap_3, cap_2;
     reg signed [7:0] cap_rmsfinal, cap_emb;
+    reg [NPR*10-1:0] cap_prompt; reg [6:0] cap_plen;
     reg [10:0] cnt; reg [3:0] emitted; reg running;
     // mock token sequence
     wire [9:0] SEQ [0:4] = '{ 10'd1, 10'd403, 10'd407, 10'd261, 10'd378 };
     always @(posedge clk) begin
-        if (!rst_n) begin cnt<=0; emitted<=0; running<=0; token_valid<=0; done<=0; token<=0; end
+        if (!rst_n) begin cnt<=0; emitted<=0; running<=0; token_valid<=0; done<=0; token<=0;
+                         cap_prompt<=0; cap_plen<=0; end
         else begin
             token_valid <= 1'b0; done <= 1'b0;
             if (start) begin
                 cap_rms<=sw_rms; cap_q<=swq; cap_k<=swk; cap_v<=swv; cap_o<=swo;
                 cap_rmsf<=sw_rmsf; cap_1<=sw1; cap_3<=sw3; cap_2<=sw2;
                 cap_rmsfinal<=sw_rmsfinal; cap_emb<=sw_emb;
+                cap_prompt<=prompt; cap_plen<=prompt_len;
                 cnt<=0; emitted<=0; running<=1;
             end else if (running) begin
                 // space tokens ~600 cycles so the wrapper's 2-byte/token packer
@@ -61,7 +66,13 @@ module gen_seq #(parameter W=8, parameter D=64, parameter NL=5, parameter NPOS=1
 endmodule
 
 // ---- MOCK node `top` (LINK_SS) : parses LL (acks "LK") and CC (acks "CK"+N data) ----
-module top #(parameter SD_HALF=135, parameter [15:0] SD_NBLK=769) (
+// Accepts the flash-boot params the wrapper passes to `top` (ignored by the mock ;
+// the mock node never touches the flash). Keeps tb_wrap compatible with the
+// FLASH_BOOT-era wrapper instance.
+module top #(parameter SD_HALF=135, parameter [15:0] SD_NBLK=769,
+             parameter [23:0] FLASH_BASE=24'h120000, parameter [23:0] FLASH_LEN=24'h060040,
+             parameter [23:0] SHIFT_BASE=24'h181000, parameter SHIFT_LOAD_EN=1'b1,
+             parameter [9:0] SPI_HALF_DIV=10'd1) (
     input  wire        clk,
     input  wire [7:0]  lk_rx_data, input wire lk_rx_empty, output wire lk_rx_rd,
     output wire [7:0]  lk_tx_data, output wire lk_tx_wr, input wire lk_tx_full,
@@ -273,7 +284,39 @@ module tb_wrap;
         end
         if (errors==0) $display("OK: CC readback (CK + 4 data)");
 
+        // ---- TEST 2c : PR with len=0 -> direct "PK", no data, prompt_len=0 (BOS path) ----
+        host_send(8'h50); host_send(8'h52); // "PR"
+        host_send(8'd0);                    // len = 0
+        host_recv(rb); if (rb !== 8'h50) begin $display("FAIL: PR0 ack b0=%02h (exp 50 'P')", rb); errors=errors+1; end
+        host_recv(rb); if (rb !== 8'h4B) begin $display("FAIL: PR0 ack b1=%02h (exp 4B 'K')", rb); errors=errors+1; end
+        if (dut.prompt_len !== 7'd0) begin $display("FAIL: PR0 prompt_len=%0d (exp 0)", dut.prompt_len); errors=errors+1; end
+        if (errors==0) $display("OK: PR len=0 -> direct PK (BOS backward-compat path)");
+
+        // ---- TEST 2d : PR with len=5 -> "PK", wrapper prompt_tokens/prompt_len correct ----
+        // tokens [1, 403, 407, 261, 378] (BOS + "Once upon a time"), lo then hi (same
+        // byte order as the token packer emits).
+        host_send(8'h50); host_send(8'h52); // "PR"
+        host_send(8'd5);                    // len = 5
+        host_send(8'h01); host_send(8'h00); // 1     = 0x001
+        host_send(8'h93); host_send(8'h01); // 403   = 0x193
+        host_send(8'h97); host_send(8'h01); // 407   = 0x197
+        host_send(8'h05); host_send(8'h01); // 261   = 0x105
+        host_send(8'h7A); host_send(8'h01); // 378   = 0x17A
+        host_recv(rb); if (rb !== 8'h50) begin $display("FAIL: PR ack b0=%02h (exp 50 'P')", rb); errors=errors+1; end
+        host_recv(rb); if (rb !== 8'h4B) begin $display("FAIL: PR ack b1=%02h (exp 4B 'K')", rb); errors=errors+1; end
+        if (dut.prompt_len !== 7'd5) begin $display("FAIL: PR prompt_len=%0d (exp 5)", dut.prompt_len); errors=errors+1; end
+        begin : pr_check
+        integer i; reg [9:0] exp [0:4]; reg [9:0] got;
+        exp[0]=10'd1; exp[1]=10'd403; exp[2]=10'd407; exp[3]=10'd261; exp[4]=10'd378;
+        for (i=0;i<5;i=i+1) begin
+            got = dut.prompt_tokens[i*10 +: 10];
+            if (got !== exp[i]) begin $display("FAIL: prompt_tokens[%0d]=%0d (exp %0d)", i, got, exp[i]); errors=errors+1; end
+        end
+        end
+        if (errors==0) $display("OK: PR len=5 -> PK + prompt_tokens latched (lo/hi bit-order OK)");
+
         // ---- TEST 3 : GO -> GK, then 5 tokens (2 bytes each) on uart_tx ----
+        // Also checks the prompt is passed to gen_seq at GO (cap_prompt/cap_plen).
         host_send(8'h47); host_send(8'h4F); // "GO"
         host_recv(rb); if (rb !== 8'h47) begin $display("FAIL: GO ack b0=%02h (exp 47)", rb); errors=errors+1; end
         host_recv(rb); if (rb !== 8'h4B) begin $display("FAIL: GO ack b1=%02h (exp 4B)", rb); errors=errors+1; end
@@ -285,7 +328,12 @@ module tb_wrap;
         if (dut.u_seq.cap_emb !== 8'hFA) begin $display("FAIL: cap_emb=%02h (exp FA)", dut.u_seq.cap_emb); errors=errors+1; end
         if (dut.u_seq.cap_rmsfinal !== 8'hFC) begin $display("FAIL: cap_rmsfinal=%02h (exp FC)", dut.u_seq.cap_rmsfinal); errors=errors+1; end
         if (dut.u_seq.cap_k[23:16] !== 8'hF9) begin $display("FAIL: cap_k[2]=%02h (exp F9)", dut.u_seq.cap_k[23:16]); errors=errors+1; end
-        if (errors==0) $display("OK: GO + GK ack + run_mode + shifts latched");
+        // prompt is passed through to gen_seq at GO (PR latch reaches u_seq)
+        if (dut.u_seq.cap_plen !== 7'd5) begin $display("FAIL: cap_plen=%0d (exp 5)", dut.u_seq.cap_plen); errors=errors+1; end
+        if (dut.u_seq.cap_prompt[0*10 +: 10] !== 10'd1)   begin $display("FAIL: cap_prompt[0]=%0d (exp 1)",   dut.u_seq.cap_prompt[0*10 +: 10]); errors=errors+1; end
+        if (dut.u_seq.cap_prompt[1*10 +: 10] !== 10'd403) begin $display("FAIL: cap_prompt[1]=%0d (exp 403)", dut.u_seq.cap_prompt[1*10 +: 10]); errors=errors+1; end
+        if (dut.u_seq.cap_prompt[4*10 +: 10] !== 10'd378) begin $display("FAIL: cap_prompt[4]=%0d (exp 378)", dut.u_seq.cap_prompt[4*10 +: 10]); errors=errors+1; end
+        if (errors==0) $display("OK: GO + GK ack + run_mode + shifts latched + prompt passed to gen_seq");
         // collect 5 tokens (mock emits SEQ=[1,403,407,261,378])
         begin : tok_block
         integer t; reg [9:0] exp [0:4];

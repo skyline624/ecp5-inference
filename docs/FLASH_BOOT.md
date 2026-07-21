@@ -12,6 +12,7 @@ autonome**.
 |-------|--------|-------------|
 | 1 | **Validée silicium (2026-07-21)** | Modèle auto-chargé depuis flash ; `SH` (47 shifts) + `GO` → 9 tokens bit-exact |
 | 2 | **Validée silicium (2026-07-21)** | Shifts aussi en flash trailer ; `RR` + `GO` seul (100 % autonome) → 9 tokens bit-exact |
+| 3 | **Validée silicium (2026-07-21)** | Prefill : opcode `PR` (prompt entrant) + mode prefill dans `gen_seq` ; `PR`+`GO` → suite bit-exact |
 
 ## Layout flash (W25Q64, 8 Mo, pins R2/V2/W2 + pad MCLK U3)
 
@@ -159,9 +160,76 @@ $env:G5_PORT="COM3"
 & "C:\Users\User\AppData\Local\Programs\Python\Python312\python.exe" host\infer_g5autonomous.py
 ```
 
-## Suite — prompt entrant (prefill)
+## Prefill (prompt entrant → génération) — VALIDÉ silicium (2026-07-21)
 
-La génération est désormais 100 % autonome (power-on → modèle+shifts auto-chargés
-→ `GO` → 17 tokens). La brique restante pour un accélérateur « boîte noire »
-complet est le **prefill** : recevoir un prompt en entrée et générer la réponse,
-au lieu du prompt actuel codé en dur (BOS). Hors périmètre de ce document.
+La brique finale « boîte noire » : recevoir un prompt (liste de token IDs) et
+générer la suite, au lieu du BOS codé en dur. Validé silicium le 2026-07-21.
+
+### Principe
+
+`gen_seq.v` itère embed+KV-fill **sans émission** pour les P-1 premiers tokens du
+prompt (le KV cache se remplit en pos 0..P-1, masque causal respecté), puis émet
+`argmax(dernier token du prompt)` = le premier token généré, et décode la suite à
+partir de pos=P. **Backward-compatible** : `prompt_len=0` → BOS hardcodé (run étape
+2 inchangé, bit-exact).
+
+### Nouvel opcode host `PR`
+
+```
+PR len t0_lo t0_hi t1_lo t1_hi ...  -> ack PK
+```
+`len` tokens (≤ 16 = NPR), chacun en 2 octets **lo puis hi** (`{6'b0, tok[9:8]}`
+pour le hi — même ordre que le token packer émet). Latch `prompt_tokens`/`prompt_len`
+dans le wrapper, câblés à `gen_seq` à `GO`. `host_state` élargi à 4 bits
+(`H_PR`/`H_PRLEN`/`H_PRDATA`). `prompt_len` clampé à NPR.
+
+### Convention BOS (côté host, le hardware est agnostique)
+
+L'oracle silicium (BOS hardcodé) place BOS=1@pos0, « Once »@1, …, « time »@4,
+argmax@4 = 432. **Pour reproduire bit-exact, préfixer BOS** : `PR 5 <1> <403>
+<407> <261> <378>` reproduit exactement le contexte oracle → 1er token émis = 432
+garanti, 13 émissions = `NPOS-P+1`. Sans BOS (`--no-bos`), le modèle s'avère
+*BOS-agnostic* sur ce prompt (1er token = 432 aussi), mais la continuation diverge
+plus tôt (positions décalées) — diagnostic modèle, pas un critère PASS.
+
+### Procédure silicium
+
+```powershell
+. C:\oss-cad-suite\environment.ps1
+openFPGALoader -b colorlight-i9 -m build\gen_seq_silicon.bit   # reconfigure -> boot flash
+$env:G5_PORT="COM3"
+& "C:\Users\User\AppData\Local\Programs\Python\Python312\python.exe" host\infer_g5prompt.py
+#   (defaut : BOS + "Once upon a time" -> ", there was a little...")
+# --ids 1 403 407 261 378           # IDs directs (avec BOS)
+# --text "Once upon a time"         # encode greedy (préfixe espace + BOS)
+# --ids 403 407 261 378 --no-bos    # experimental (sans BOS)
+```
+`run_mode` reste collé à 1 après `GO` (PR/RR injoignables) → **reconfigurer
+(`-m`) entre les runs** (one-shot, comme le workflow flash-boot). V1.1 (reporté) :
+`done`→`run_mode=0` gated par `TP_IDLE` pour itérer sans reconfigure.
+
+### Résultats (2026-07-21)
+
+```
+P=5 [1,403,407,261,378] (BOS+"Once upon a time") -> 13 tokens
+  Genere : [432, 383, 286, 261, 376, 268, 414, 421, 303, 428, 415, 412, 264]
+  Texte  : ", there was a little bolanghand"
+  1er token = 432 (argmax de "time"), 5 bit-exact oracle[5:]  [PASS]
+P=0 (pas de PR, BOS hardcodé) -> 17 tokens = run étape 2 bit-exact
+  Texte  : "Once upon a time, there was a little bolanghand"  [PASS] (backward compat)
+P=4 [403,407,261,378] --no-bos -> 14 tokens
+  1er = 432 aussi (modèle BOS-agnostic), ", there was a little b" identique,
+  divergence plus tôt dans la continuation (positions décalées sans BOS)
+```
+Divergence nominale @ `oracle[10]=298` (même point qu'en étape 2, accepté).
+
+### Fichiers
+
+- `src/gen_seq.v` : param `NPR=16`, ports `prompt`/`prompt_len`, regs
+  `prefill_left`/`prompt_idx`, mode prefill dans IDLE (l.248) + AMAXC (l.562).
+- `board/gen_seq_silicon.v` : opcode `PR` (3 états), `host_state` 4 bits, regs
+  `prompt_tokens`/`prompt_len`/`prompt_idx`/`pr_lo`, instance `u_seq` câblée.
+- `board/tb_wrap.v` : sim G1 niveau 1 (FSM PR : PR0/PR5, bit-ordering, regression).
+- `host/infer_g5prompt.py` : PR + GO + lecture, encode greedy, alignement oracle.
+- Build : 61 % LUT (+13 % vs étape 2, mux `prompt[prompt_idx*10 +: 10]` 16:1 sur
+  10 bits + décodeur PR), DFF 21 %, Fmax 36.4 MHz, 0 erreur.

@@ -27,7 +27,8 @@
 //                       each token_valid packs 2 bytes to uart_tx. Host is read-only.
 // =============================================================================
 module gen_seq_silicon #(
-    parameter W = 8, parameter D = 64, parameter NL = 5, parameter NPOS = 17
+    parameter W = 8, parameter D = 64, parameter NL = 5, parameter NPOS = 17,
+    parameter NPR = 16        // max prompt tokens for prefill (PR opcode)
 ) (
     input  wire           clk,                 // 25 MHz, pin P3
     input  wire           uart_rx,             // H18 (host -> FPGA, 1 Mbaud)
@@ -71,6 +72,14 @@ module gen_seq_silicon #(
     // ---- Shift register file (47 bytes loaded by `SH`, held for the whole run) ----
     reg [NL*8-1:0] sw_rms, swq, swk, swv, swo, sw_rmsf, sw1, sw3, sw2;
     reg signed [7:0] sw_rmsfinal, sw_emb;
+
+    // ---- Prompt register file (loaded by `PR`, fed to gen_seq at GO) ----
+    // prompt_tokens = NPR packed 10-bit token IDs (lo-first over UART : t_lo then t_hi).
+    // prompt_len=0 at reset -> gen_seq uses its hardcodé BOS (backward compat, étape 2).
+    reg [NPR*10-1:0] prompt_tokens;
+    reg [6:0]        prompt_len;
+    reg [4:0]        prompt_idx;   // next token slot during PR ingest
+    reg [7:0]        pr_lo;        // low byte held between the lo/hi pair
 
 `ifdef FLASH_BOOT
     // 47 shift bytes from the flash trailer (step 2). Latched once into sw_* when
@@ -117,13 +126,14 @@ module gen_seq_silicon #(
     wire s_cmd_full = run_mode ? cmd_full : 1'b1;
     wire s_resp_empty = run_mode ? resp_empty : 1'b1;  // gen_seq never reads in LOAD
 
-    gen_seq #(.W(W), .D(D), .NL(NL), .NPOS(NPOS)) u_seq (
+    gen_seq #(.W(W), .D(D), .NL(NL), .NPOS(NPOS), .NPR(NPR)) u_seq (
         .clk(clk), .rst_n(rst_n & seq_rst_n), .start(start_pulse), .gen_mode(1'b1),
         .x_in({W*D{1'b0}}), .sx_in(8'sd0),
         .sw_rms(sw_rms), .swq(swq), .swk(swk), .swv(swv), .swo(swo),
         .sw_rmsf(sw_rmsf), .sw1(sw1), .sw3(sw3), .sw2(sw2),
         .sw_rmsfinal(sw_rmsfinal), .sw_emb(sw_emb),
         .pos(6'd0), .base(23'd0),
+        .prompt(prompt_tokens), .prompt_len(prompt_len),
         .lk_cmd_data(s_cmd_data), .lk_cmd_wr(s_cmd_wr), .lk_cmd_full(s_cmd_full),
         .lk_resp_data(s_resp_data), .lk_resp_empty(s_resp_empty), .lk_resp_rd(s_resp_rd),
         .result(result), .result_sh(result_sh), .token(token),
@@ -137,8 +147,12 @@ module gen_seq_silicon #(
         .rclk(clk), .rrst_n(rst_n), .rinc(resp_rd), .rdata(resp_rdata), .rempty(resp_empty));
 
     // ---- Forward latch (host rx -> u_cmd) : 1-deep elastic buffer, never drops ----
-    localparam H_IDLE=3'd0, H_FWD=3'd1, H_S=3'd2, H_SH=3'd3, H_G=3'd4, H_GK=3'd5, H_R=3'd6;
-    reg [2:0] host_state = H_IDLE;
+    // host_state is 4 bits : H_IDLE..H_R (0..6) + H_PR/H_PRLEN/H_PRDATA (7..9) for the
+    // `PR` (prompt load) opcode. The forward-latch and the `host_state != H_R` guard
+    // below are width-insensitive.
+    localparam H_IDLE=4'd0, H_FWD=4'd1, H_S=4'd2, H_SH=4'd3, H_G=4'd4, H_GK=4'd5, H_R=4'd6,
+               H_PR=4'd7, H_PRLEN=4'd8, H_PRDATA=4'd9;
+    reg [3:0] host_state = H_IDLE;
     wire is_pt = (rx_byte==8'h4C)|(rx_byte==8'h57)|(rx_byte==8'h42)|(rx_byte==8'h43); // L W B C
     wire fwd_accept = rx_valid & ((host_state==H_FWD) | (host_state==H_IDLE & is_pt));
     reg [7:0] fwd_buf;  reg fwd_pending;
@@ -216,6 +230,7 @@ module gen_seq_silicon #(
             fwd_op1 <= 8'd0; fwd_idx <= 4'd0; cc_n0 <= 8'd0;
             sw_rms<=0; swq<=0; swk<=0; swv<=0; swo<=0;
             sw_rmsf<=0; sw1<=0; sw3<=0; sw2<=0; sw_rmsfinal<=8'sd0; sw_emb<=8'sd0;
+            prompt_len<=7'd0; prompt_idx<=5'd0; prompt_tokens<={NPR*10{1'b0}}; pr_lo<=8'd0;
 `ifdef FLASH_BOOT
             shifts_latched <= 1'b0;
 `endif
@@ -257,6 +272,7 @@ module gen_seq_silicon #(
                         8'h53: host_state <= H_S;    // S -> SH?
                         8'h47: host_state <= H_G;    // G -> GO?
                         8'h52: host_state <= H_R;    // R -> RR?
+                        8'h50: host_state <= H_PR;   // P -> PR? (prompt load)
                         default: host_state <= H_IDLE;
                     endcase
                 end
@@ -319,6 +335,36 @@ module gen_seq_silicon #(
                         seq_rst_n <= 1'b0;      // reset gen_seq for 1 cycle
                         host_state <= H_IDLE;
                     end else host_state <= H_IDLE;
+                end
+                // ---- PR : load prompt tokens (prefill) ----
+                // Format : PR len t0_lo t0_hi t1_lo t1_hi ...  (len tokens, lo then hi,
+                // same byte order as the token packer emits). Ack 'P''K'. prompt_len is
+                // clamped to NPR ; the host MUST send len <= NPR (and <= NPOS-1 to leave
+                // room for >=1 generated token). prompt_len=0 -> ack direct, BOS path.
+                H_PR: if (rx_valid) begin
+                    if (rx_byte==8'h52) host_state <= H_PRLEN;   // 'R' -> PR
+                    else host_state <= H_IDLE;
+                end
+                H_PRLEN: if (rx_valid) begin
+                    prompt_len <= (rx_byte > NPR) ? NPR[6:0] : rx_byte[6:0];
+                    if (rx_byte==8'd0) begin
+                        a_sel_next <= 1'b0; a_drain <= 16'd2; a_b0c <= 8'h50; a_b1c <= 8'h4B; ack_go <= 1'b1; // 'P','K'
+                        host_state <= H_IDLE;
+                    end else begin
+                        prompt_idx <= 5'd0; sh_cnt <= 7'd0;
+                        host_state <= H_PRDATA;
+                    end
+                end
+                H_PRDATA: if (rx_valid) begin
+                    if (sh_cnt[0]==1'b0) pr_lo <= rx_byte;
+                    else begin
+                        prompt_tokens[prompt_idx*10 +: 10] <= {rx_byte[1:0], pr_lo};
+                        prompt_idx <= prompt_idx + 5'd1;
+                    end
+                    if (sh_cnt == ({prompt_len,1'b0} - 7'd1)) begin   // 2*prompt_len-1 = last hi byte
+                        a_sel_next <= 1'b0; a_drain <= 16'd2; a_b0c <= 8'h50; a_b1c <= 8'h4B; ack_go <= 1'b1; // 'P','K'
+                        host_state <= H_IDLE;
+                    end else sh_cnt <= sh_cnt + 7'd1;
                 end
                 default: host_state <= H_IDLE;
             endcase

@@ -47,7 +47,8 @@ module gen_seq #(
     parameter NCHUNK = 8,                 // VOCAB/64
     parameter A_RMSFINAL = 23'h060000,    // final rmsnorm weight
     parameter A_EMB      = 23'h000000,    // tok_emb (shared classifier), chunk c @ +c*0x1000
-    parameter NPOS  = 17                  // generation length (token loop)
+    parameter NPOS  = 17,                 // generation length (token loop)
+    parameter NPR   = 16                  // max prompt tokens for prefill (prompt_len=0 -> BOS)
 ) (
     input  wire            clk, rst_n, start,
     input  wire            gen_mode,      // 0 = single-shot (external x_in), 1 = autonomous generation
@@ -58,6 +59,9 @@ module gen_seq #(
     input  wire signed [7:0] sw_rmsfinal, sw_emb,          // lm_head shifts (single, shared)
     input  wire [5:0]      pos,           // single-shot mode : fixed position
     input  wire [22:0]     base,
+    // prefill : prompt token IDs (packed) + count. prompt_len=0 -> BOS hardcodé (backward compat).
+    input  wire [NPR*10-1:0] prompt,
+    input  wire [6:0]        prompt_len,
     output wire [7:0]      lk_cmd_data,
     output wire            lk_cmd_wr,
     input  wire            lk_cmd_full,
@@ -152,6 +156,11 @@ module gen_seq #(
     wire [22:0] base_l = base + LBASE + {layer,16'b0};   // = base + LBASE + layer*0x10000
     reg [9:0] cur_tok;                       // current token fed to EMBED (gen mode)
     reg [5:0] pos_reg;                       // effective position (internal counter in gen mode)
+    // prefill : prompt_len tokens ingérés sans émission (embed+KVWR), puis émission au
+    // dernier token du prompt = premier token généré. prefill_left = tokens prompt
+    // restant à traiter APRÈS le courant ; prompt_idx = prochain index dans `prompt`.
+    reg [6:0] prefill_left;
+    reg [4:0] prompt_idx;
     // per-layer weight shift selected by the current layer
     wire signed [7:0] sw_rms_l  = $signed(sw_rms [layer*8 +: 8]);
     wire signed [7:0] swq_l     = $signed(swq    [layer*8 +: 8]);
@@ -239,6 +248,7 @@ module gen_seq #(
             ldi<=0; vwe<=0; hidx<=0; mmp<=0; mmo<=0; mmv<=0; rcp<=0; rope_rd<=0;
             alu_start<=0; fc<=0; in_ffn<=0; layer<=0; token<=0;
             cur_tok<=10'd1; pos_reg<=6'd0; token_valid<=1'b0;
+            prefill_left<=7'd0; prompt_idx<=5'd0;
         end else begin
             tx_send<=0; done<=0; vwe<=0; alu_start<=0; token_valid<=1'b0;
             if (vwe) vfile[vaddr] <= vdin;
@@ -246,7 +256,17 @@ module gen_seq #(
             case (st)
                 // load external x into vfile[XB], then start the attention block
                 IDLE: if (start) begin sx0<=sx_in; sxn<=sx_in; sxb<=sx_in;
-                        fc<=0; in_ffn<=0; layer<=0; bcnt<=0; ldi<=0; cur_tok<=10'd1;
+                        fc<=0; in_ffn<=0; layer<=0; bcnt<=0; ldi<=0;
+                        if (prompt_len != 7'd0) begin
+                            // prefill : embed the first prompt token, no emission until the last one
+                            cur_tok      <= prompt[0*10 +: 10];
+                            prefill_left <= prompt_len - 7'd1;
+                            prompt_idx   <= 5'd1;
+                        end else begin
+                            cur_tok      <= 10'd1;            // BOS hardcodé (backward compat)
+                            prefill_left <= 7'd0;
+                            prompt_idx   <= 5'd0;
+                        end
                         if (gen_mode) begin phase<=PH_EE; pos_reg<=6'd0; st<=BWAIT; end  // autonomous : embed first
                         else          begin phase<=PH_FN; pos_reg<=pos;   st<=LOADX; end // single-shot : external x
                     end
@@ -566,11 +586,25 @@ module gen_seq #(
                     if (amax_i==VOCAB-1) begin
                         token <= best_idx;
                         if (gen_mode) begin
-                            token_valid <= 1'b1; cur_tok <= best_idx;   // emit + feed next EMBED
-                            if (pos_reg == NPOS-1) begin done<=1; st<=IDLE; end   // last token
-                            else begin  // next token : embed again, KV cache persists
-                                pos_reg<=pos_reg+1; layer<=0; in_ffn<=1'b0; fc<=2'd0;
+                            if (prefill_left != 7'd0) begin
+                                // prefill intermédiaire : embed prochain token du prompt,
+                                // PAS d'émission (token_valid reste 0 par défaut). KV cache
+                                // se remplit à pos 0..P-1, masque causal pos_reg+1 respecté.
+                                cur_tok      <= prompt[prompt_idx*10 +: 10];
+                                prompt_idx   <= prompt_idx + 5'd1;
+                                prefill_left <= prefill_left - 7'd1;
+                                pos_reg      <= pos_reg + 6'd1;
+                                layer<=0; in_ffn<=1'b0; fc<=2'd0;
                                 phase<=PH_EE; st<=BUILD;
+                            end else begin
+                                // dernier token du prompt (prefill_left vient d'atteindre 0)
+                                // OU decode normal : émission + feed argmax (comportement actuel).
+                                token_valid <= 1'b1; cur_tok <= best_idx;   // emit + feed next EMBED
+                                if (pos_reg == NPOS-1) begin done<=1; st<=IDLE; end   // last token
+                                else begin  // next token : embed again, KV cache persists
+                                    pos_reg<=pos_reg+1; layer<=0; in_ffn<=1'b0; fc<=2'd0;
+                                    phase<=PH_EE; st<=BUILD;
+                                end
                             end
                         end else begin done<=1; st<=IDLE; end
                     end
