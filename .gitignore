@@ -3,6 +3,7 @@
 # Les scripts build.ps1 / build.sh / install_toolchain.ps1 / scaffold.ps1 /
 # synth.ys et sim/Makefile sont des sources et ne matchent pas ces patterns.
 *.bit
+*.bin
 *.config
 *.rpt
 *.log

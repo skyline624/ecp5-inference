@@ -41,6 +41,14 @@ module gen_seq_silicon #(
     inout  wire [31:0]   IO_sdram_dq,
     output wire [10:0]   O_sdram_addr,
     output wire [1:0]    O_sdram_ba
+`ifdef FLASH_BOOT
+    // SPI flash (W25Q64) for the autonomous boot. CS/MOSI/MISO on R2/W2/V2.
+    // SCK is NOT a top-level pin: pin U3 is the dedicated MCLK/CCLK pad and is
+    // driven via the USRMCLK primitive below (see LPF header comment).
+    ,output wire       flash_mosi
+    ,input  wire       flash_miso
+    ,output wire       flash_cs_n
+`endif
 );
     // ---- Power-on reset (raw clk domain; the node has its own internal POR) ----
     // Counter saturates at 0xFFFF so rst_n = por[15] rises once and STAYS high.
@@ -63,6 +71,29 @@ module gen_seq_silicon #(
     // ---- Shift register file (47 bytes loaded by `SH`, held for the whole run) ----
     reg [NL*8-1:0] sw_rms, swq, swk, swv, swo, sw_rmsf, sw1, sw3, sw2;
     reg signed [7:0] sw_rmsfinal, sw_emb;
+
+`ifdef FLASH_BOOT
+    // 47 shift bytes from the flash trailer (step 2). Latched once into sw_* when
+    // shifts_valid_from_flash asserts (end of the flash boot). A later UART `SH`
+    // still overwrites sw_* for debug. Order matches gen_flash_model.py trailer /
+    // sh_packet / H_SH exactly.
+    wire [47*8-1:0] shifts_from_flash;
+    wire            shifts_valid_from_flash;
+    reg             shifts_latched;
+
+    // SCK to the W25Q64 : driven through the USRMCLK primitive to the dedicated
+    // MCLK/CCLK pad (U3). flash_sck_int is the fabric-side clock from u_n.
+    // sck_tsen (from u_n) is the tri-state control : 0 = drive SCK (only while
+    // flash_boot is actively reading), 1 = HiZ (else) so the hard config controller
+    // / JTAG spiOverJtag can reprogram the flash without contention. USRMCLKTS may
+    // NOT be a compile-time constant -- it is a real signal from the node.
+    wire            flash_sck_int;
+    wire            sck_tsen;
+    USRMCLK u_flashmclk (
+        .USRMCLKI (flash_sck_int),
+        .USRMCLKTS(sck_tsen)
+    );
+`endif
 
     // ---- Mode + start ----
     reg run_mode = 1'b0;       // 0 = LOAD (host owns lk bus), 1 = RUN (gen_seq owns)
@@ -185,10 +216,34 @@ module gen_seq_silicon #(
             fwd_op1 <= 8'd0; fwd_idx <= 4'd0; cc_n0 <= 8'd0;
             sw_rms<=0; swq<=0; swk<=0; swv<=0; swo<=0;
             sw_rmsf<=0; sw1<=0; sw3<=0; sw2<=0; sw_rmsfinal<=8'sd0; sw_emb<=8'sd0;
-        end else if (run_mode) begin
-            // RUN : host FSM idle (host read-only); token packer drives u_tx.
-            host_state <= H_IDLE; start_pulse <= 1'b0; ack_go <= 1'b0;
+`ifdef FLASH_BOOT
+            shifts_latched <= 1'b0;
+`endif
         end else begin
+`ifdef FLASH_BOOT
+            // Step 2 : latch the 47 shifts from the flash trailer once, when the
+            // flash boot signals them valid. A later UART `SH` (H_SH below) still
+            // overwrites sw_* for debug. Order matches gen_flash_model.py trailer
+            // and the sh_packet / H_SH order exactly.
+            if (shifts_valid_from_flash && !shifts_latched) begin
+                sw_rms      <= shifts_from_flash[ 0*8 +: 40];
+                swq         <= shifts_from_flash[ 5*8 +: 40];
+                swk         <= shifts_from_flash[10*8 +: 40];
+                swv         <= shifts_from_flash[15*8 +: 40];
+                swo         <= shifts_from_flash[20*8 +: 40];
+                sw_rmsf     <= shifts_from_flash[25*8 +: 40];
+                sw1         <= shifts_from_flash[30*8 +: 40];
+                sw3         <= shifts_from_flash[35*8 +: 40];
+                sw2         <= shifts_from_flash[40*8 +: 40];
+                sw_rmsfinal <= $signed(shifts_from_flash[45*8 +: 8]);
+                sw_emb      <= $signed(shifts_from_flash[46*8 +: 8]);
+                shifts_latched <= 1'b1;
+            end
+`endif
+            if (run_mode) begin
+                // RUN : host FSM idle (host read-only); token packer drives u_tx.
+                host_state <= H_IDLE; start_pulse <= 1'b0; ack_go <= 1'b0;
+            end else begin
             start_pulse <= 1'b0; ack_go <= 1'b0;
             case (host_state)
                 H_IDLE: if (rx_valid) begin
@@ -268,11 +323,19 @@ module gen_seq_silicon #(
                 default: host_state <= H_IDLE;
             endcase
             if (host_state != H_R) seq_rst_n <= 1'b1;  // release gen_seq reset
-        end
+            end // close the LOAD (run_mode==0) else-begin
+        end     // close the post-reset else-begin
     end
 
     // ---- u_resp read side mux (RUN = gen_seq, LOAD = ack serializer) ----
     assign resp_rd = run_mode ? s_resp_rd : a_resp_rd;
+    // data path : no mux needed -- in LOAD, s_resp_empty=1 blocks gen_seq so it
+    // never asserts s_resp_rd / never reads s_resp_data; in RUN, the ack serializer
+    // sits in A_IDLE and never asserts a_resp_rd. Both sides read the same FIFO, but
+    // only one is ever active, so the read data can be shared directly. Omitting this
+    // assign left s_resp_data undriven -> gen_seq read 0x00 for every node response in
+    // RUN -> all activations/logits 0 -> argmax 0 -> "17 tokens = 0" on silicon.
+    assign s_resp_data = resp_rdata;
 
     // ---- Token packer (RUN) : 2 bytes per token_valid on u_tx ----
     // Same busy-then-done handshake as the ack serializer : the low and high bytes
@@ -304,12 +367,22 @@ module gen_seq_silicon #(
 
     // ---- the LINK_SS compute node (module `top` in node_top.v) ----
     wire [5:0] node_led;
-    top #(.SD_HALF(135), .SD_NBLK(769)) u_n (
+    top #(
+        .FLASH_BASE(24'h120000), .FLASH_LEN(24'h060040), .SHIFT_BASE(24'h181000),
+        .SHIFT_LOAD_EN(1'b1),    .SPI_HALF_DIV(10'd1)   // step 2: shifts also from flash trailer
+    ) u_n (
         .clk(clk),
         .lk_rx_data(c_rdata), .lk_rx_empty(c_empty), .lk_rx_rd(c_rd),
         .lk_tx_data(r_wdata), .lk_tx_wr(r_wr), .lk_tx_full(r_full), .led(node_led),
         .O_sdram_clk(O_sdram_clk),
         .O_sdram_cas_n(O_sdram_cas_n), .O_sdram_ras_n(O_sdram_ras_n), .O_sdram_wen_n(O_sdram_wen_n),
-        .IO_sdram_dq(IO_sdram_dq), .O_sdram_addr(O_sdram_addr), .O_sdram_ba(O_sdram_ba));
+        .IO_sdram_dq(IO_sdram_dq), .O_sdram_addr(O_sdram_addr), .O_sdram_ba(O_sdram_ba)
+`ifdef FLASH_BOOT
+        ,.flash_sck(flash_sck_int), .flash_mosi(flash_mosi),
+        .flash_miso(flash_miso), .flash_cs_n(flash_cs_n),
+        .flash_sck_tsen(sck_tsen),
+        .shifts_out(shifts_from_flash), .shifts_valid(shifts_valid_from_flash)
+`endif
+    );
     assign led = node_led;
 endmodule

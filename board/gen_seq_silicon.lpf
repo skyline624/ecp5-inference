@@ -70,3 +70,16 @@ LOCATE COMP "IO_sdram_dq[28]" SITE "E12"; IOBUF PORT "IO_sdram_dq[28]" IO_TYPE=L
 LOCATE COMP "IO_sdram_dq[29]" SITE "B17"; IOBUF PORT "IO_sdram_dq[29]" IO_TYPE=LVCMOS33;
 LOCATE COMP "IO_sdram_dq[30]" SITE "D14"; IOBUF PORT "IO_sdram_dq[30]" IO_TYPE=LVCMOS33;
 LOCATE COMP "IO_sdram_dq[31]" SITE "D13"; IOBUF PORT "IO_sdram_dq[31]" IO_TYPE=LVCMOS33;
+
+# --- SPI Flash (W25Q64JVSIQ, 8 MB) -- autonomous boot (ifdef FLASH_BOOT) ---
+# CS/MOSI/MISO are normal GPIO (R2/W2/V2). SCK is NOT a normal IO on CABGA381 :
+# pin U3 is the dedicated MCLK/CCLK pad (tile SPICB0) used by the hard config
+# controller at power-on. After configuration that controller releases the pad,
+# and the only way to drive SCK from the fabric is the USRMCLK primitive (see
+# gen_seq_silicon.v). So flash_sck must NOT be a top-level port / NOT constrained
+# here -- USRMCLK routes it internally to the U3 pad. (litex/neorv32/orangecrab
+# all do this; the "USRMCLK conflicts with the config controller" worry is a
+# myth -- they are mutually exclusive in time.)
+LOCATE COMP "flash_cs_n" SITE "R2"; IOBUF PORT "flash_cs_n" IO_TYPE=LVCMOS33;
+LOCATE COMP "flash_miso" SITE "V2"; IOBUF PORT "flash_miso" IO_TYPE=LVCMOS33;
+LOCATE COMP "flash_mosi" SITE "W2"; IOBUF PORT "flash_mosi" IO_TYPE=LVCMOS33;

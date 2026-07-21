@@ -75,8 +75,15 @@
 // =============================================================================
 
 module top #(
-    parameter        SD_HALF = 135,      // SD SPI clock divider (~100 kHz @27MHz, reliable reads)
-    parameter [15:0] SD_NBLK = 16'd769   // blocks to load from SD at boot (stories260K = 769)
+    // Flash-boot params (active under `ifdef FLASH_BOOT). The model image lives in
+    // the W25Q64 at FLASH_BASE; flash_boot DMAs FLASH_LEN bytes into SDRAM, then
+    // (SHIFT_LOAD_EN=1) reads a 47-byte shift trailer at SHIFT_BASE. See flash_boot.v
+    // and host/gen_flash_model.py for the layout.
+    parameter [23:0] FLASH_BASE    = 24'h120000,
+    parameter [23:0] FLASH_LEN     = 24'h060040,
+    parameter [23:0] SHIFT_BASE    = 24'h181000,   // = FLASH_BASE + 0x061000
+    parameter        SHIFT_LOAD_EN = 1,            // 0 = step 1 (SH via UART), 1 = step 2 (flash trailer)
+    parameter [9:0]  SPI_HALF_DIV  = 10'd1         // SCK ~ clk_sys/(2*(SPI_HALF+1)) ~ 6.25 MHz
 ) (
     input  wire        clk,             // 25 MHz, pin P3 (Colorlight i9 v7.2)
 `ifdef LINK_SS
@@ -102,11 +109,19 @@ module top #(
     inout  wire [31:0] IO_sdram_dq,
     output wire [10:0] O_sdram_addr,
     output wire [1:0]  O_sdram_ba
-`ifdef SD_BOOT
-    ,output wire       sd_clk          // SD_CLK  (pin 83)
-    ,output wire       sd_cmd          // SD_CMD  / MOSI (pin 82)
-    ,input  wire       sd_dat0         // SD_DAT0 / MISO (pin 84)
-    ,output wire       sd_dat3         // SD_DAT3 / CS#  (pin 81)
+`ifdef FLASH_BOOT
+    ,output wire       flash_sck       // SPI SCK   (pad MCLK/U3 via USRMCLK in wrapper)
+    ,output wire       flash_mosi      // SPI MOSI  (pin W2)
+    ,input  wire       flash_miso      // SPI MISO  (pin V2)
+    ,output wire       flash_cs_n      // SPI CS#   (pin R2)
+    // USRMCLK tri-state control for the wrapper's USRMCLK instance.
+    // 0 = drive SCK (only while flash_boot is actively reading), 1 = HiZ (let the
+    // hard config controller / JTAG spiOverJtag own the pad). HiZ at reset and
+    // after boot -> no contention with FPGA configuration or in-flash reprogram.
+    ,output wire       flash_sck_tsen
+    // 47 shift bytes latched from the flash trailer (step 2) -> wrapper populates sw_*
+    ,output wire [47*8-1:0] shifts_out
+    ,output wire       shifts_valid
 `endif
 `ifdef CLUSTER_NODE
     ,output wire       clk_sys_out     // system clock for the on-chip sequencer + inter-FPGA link
@@ -155,7 +170,7 @@ module top #(
     end
 
     // ---- SD-card boot loader : SD -> SDRAM at power-on, then hand over to the FSM ----
-`ifdef SD_BOOT
+`ifdef FLASH_BOOT
     wire        boot_done;
     wire        booting = ~boot_done;
     reg         boot_start = 1'b0, boot_started = 1'b0;
@@ -164,19 +179,27 @@ module top #(
         else begin
             boot_start <= 1'b0;
             // wait for the SDRAM init (200us power-on) to finish before reading
-            // block 0, else its bytes fill the FIFO while the SDRAM is busy.
+            // the model image, else its bytes fill the path while the SDRAM is busy.
             if (!boot_started && !sd_busy) begin boot_start <= 1'b1; boot_started <= 1'b1; end
         end
     end
+    // USRMCLKTS : HiZ except while flash_boot is actively running (between the
+    // SDRAM-init pulse and boot_done). HiZ at reset protects the config controller.
+    assign flash_sck_tsen = ~(boot_started & ~boot_done);
     wire [22:0] boot_addr; wire [7:0] boot_din; wire boot_wr; wire [15:0] boot_dbg;
     wire boot_ready, boot_fail, boot_wpend, boot_drained;
-    sd_boot #(.HALF(SD_HALF), .NBLK(SD_NBLK)) u_boot (
+    flash_boot #(
+        .FLASH_BASE(FLASH_BASE), .FLASH_LEN(FLASH_LEN), .SHIFT_BASE(SHIFT_BASE),
+        .SHIFT_LOAD(SHIFT_LOAD_EN), .SPI_HALF(SPI_HALF_DIV)
+    ) u_boot (
         .clk(clk_sys), .rstn(rst_n), .start(boot_start),
-        .sd_clk(sd_clk), .sd_cmd(sd_cmd), .sd_dat0(sd_dat0), .sd_dat3(sd_dat3),
+        .flash_sck(flash_sck), .flash_mosi(flash_mosi),
+        .flash_miso(flash_miso), .flash_cs_n(flash_cs_n),
         .mem_addr(boot_addr), .mem_din(boot_din), .mem_wr(boot_wr),
         .sdram_busy(sd_busy), .done(boot_done), .dbg_blk(boot_dbg),
         .dbg_ready(boot_ready), .dbg_fail(boot_fail), .dbg_wpend(boot_wpend),
-        .drained(boot_drained));
+        .drained(boot_drained),
+        .shifts_out(shifts_out), .shifts_valid(shifts_valid));
     // refresh the SDRAM during the (long) boot load, else early rows decay.
     // Only refresh when the boot write path is drained (FIFO empty), so a refresh
     // never catches a partially-full FIFO and overflows it (silent byte drops).
@@ -3057,9 +3080,9 @@ module top #(
 
     reg [23:0] hb = 24'd0;
     always @(posedge clk_sys) hb <= hb + 24'd1;
-`ifdef SD_BOOT
+`ifdef FLASH_BOOT
     // during boot: led[5]=solid (booting), led[4:0]=block counter (flickers=progress, frozen=stuck)
-    // boot diag on LEDs (lit = 1): [5]=heartbeat [4]=SD ready [3]=SD FAIL [2]=SDRAM busy [1]=write pending [0]=boot done
+    // boot diag on LEDs (lit = 1): [5]=heartbeat [4]=flash ready [3]=flash FAIL [2]=SDRAM busy [1]=write pending [0]=boot done
     assign led = ~( booting ? {hb[23], boot_ready, boot_fail, sd_busy, boot_wpend, boot_done}
                             : {state[3:0], op_silu, hb[23]} );
 `else

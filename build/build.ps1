@@ -22,6 +22,7 @@ param(
     [string]$Board = "colorlight-i9",
     [string]$Lpf   = "../board/$Top.lpf",
     [string]$Extra = "",
+    [string]$Defines = "",   # CSV list of Verilog defines passed to each read_verilog (e.g. "NODE_ONLY")
     [switch]$Flash,
     [switch]$NoAllowUnconstrained
 )
@@ -40,9 +41,18 @@ if (Test-Path "../lut/*.hex") {
     Write-Warning "../lut/*.hex not found -- operator LUTs will be missing. Run scripts/regen_luts.py first."
 }
 
-$readCmd = "read_verilog ../board/$Top.v"
+# Build optional -D<define> args for read_verilog (e.g. -DNODE_ONLY). Inoffensive on
+# files that don't use the define. Needed for gen_seq_silicon (NODE_ONLY drops the
+# redundant internal GG FSM of the `top` node, else synth blows to 139% LUT and
+# nextpnr cannot route -- see memory note gen-silicon-nodeonly-fix).
+$DefFlags = ""
+if ($Defines -ne "") {
+    $DefFlags = (($Defines -split ",") | ForEach-Object { "-D$_" }) -join " "
+}
+
+$readCmd = "read_verilog $DefFlags ../board/$Top.v"
 if ($Extra -ne "") {
-    foreach ($f in ($Extra -split ",")) { $readCmd += "; read_verilog $f" }
+    foreach ($f in ($Extra -split ",")) { $readCmd += "; read_verilog $DefFlags $f" }
 }
 
 Write-Host "==> yosys synth ($Top)" -ForegroundColor Cyan
