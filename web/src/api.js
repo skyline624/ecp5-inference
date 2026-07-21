@@ -18,3 +18,46 @@ export async function getGraphSvg(top) {
   if (!r.ok) throw new Error(`graph_svg ${top}: ${r.status}`);
   return r.text();
 }
+
+// --- Phase B : simulation / VCD ---
+
+export async function listTbs() {
+  const r = await fetch(`${BASE}/tb`);
+  return r.json();
+}
+
+export async function runSim(tb, mode = '') {
+  const r = await fetch(`${BASE}/sim/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tb, mode }),
+  });
+  if (!r.ok) throw new Error(`run ${tb}: ${r.status}`);
+  return r.json();
+}
+
+export async function simStatus(jobId) {
+  const r = await fetch(`${BASE}/sim/${jobId}/status`);
+  return r.json();
+}
+
+export async function simSignals(jobId) {
+  const r = await fetch(`${BASE}/sim/${jobId}/signals`);
+  if (!r.ok) throw new Error(`signals: ${r.status}`);
+  return r.json();
+}
+
+export async function simTimeline(jobId, signals, fromT = 0, toT = null, clkRef = null) {
+  const r = await fetch(`${BASE}/sim/${jobId}/timeline`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ signals, from_t: fromT, to_t: toT, clk_ref: clkRef }),
+  });
+  if (!r.ok) throw new Error(`timeline: ${r.status}`);
+  return r.json();
+}
+
+export async function simJobs() {
+  const r = await fetch(`${BASE}/sim`);
+  return r.json();
+}

@@ -10,8 +10,8 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
-  font-family: "Helvetica Neue", Arial, sans-serif; font-size: 14px; }
-#app { height: 100vh; }
+  font-family: "Helvetica Neue", Arial, sans-serif; font-size: 14px; overflow: hidden; }
+#app { height: calc(100vh - 36px); }
 .pt-layout { display: flex; flex-direction: column; height: 100vh; }
 .pt-toolbar {
   display: flex; align-items: center; gap: 12px;
@@ -39,3 +39,22 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
 .pt-hl :is(polygon, ellipse, rect, path) { stroke: var(--hl) !important; stroke-width: 2.5 !important; }
 .pt-edge-hl { stroke: var(--edge-hl) !important; stroke-width: 2.2 !important; }
 .pt-edge-hl + text, .pt-edge-hl text { fill: var(--edge-hl) !important; }
+
+/* onglets vues */
+.pt-tabs { display: flex; gap: 2px; background: #11111b; height: 36px;
+  padding: 4px 8px 0; border-bottom: 1px solid #45475a; }
+.pt-tab { background: transparent; color: var(--muted); border: none;
+  border-bottom: 2px solid transparent; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+.pt-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.pt-tab:hover { color: var(--fg); }
+
+/* Phase B : timeline */
+.pt-btn { background: var(--panel-2); color: var(--fg); border: 1px solid #45475a;
+  border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+.pt-btn:hover { border-color: var(--accent); }
+.pt-sep { color: #45475a; margin: 0 6px; }
+.tl-wave { flex: 1; overflow: auto; background: #181825; padding: 4px; }
+.tl-siglist { display: flex; flex-direction: column; gap: 3px; }
+.tl-sig { display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; }
+.tl-val { font-size: 11px; margin-bottom: 3px; }
+.tl-val code { background: var(--panel-2); padding: 1px 5px; border-radius: 3px; }
