@@ -3,11 +3,15 @@
 Validates the token loop mechanics BEFORE the full (very long) 17-token run :
 embed (EE), the token loop, pos increment, the PERSISTENT KV cache (token 1 at
 pos=1 reads token 0's KV at pos=0), and the multi-position causal MM. The first
-tokens must match the oracle [403, 407, ...].
+2 tokens must match the node-faithful reference [403, 407] (= oracle float too,
+logits well separated so the argmax is robust ; the @tok9 divergence 268 vs 298
+only appears at pos=9, not reached here).
+
+Reference = dump['node_tokens'] (bit-exact node model host/prove_gen_node.py),
+NOT the float oracle.
 
 Loads host/gen_model_dump.json (real stories260K, quantised on the host with numpy
-since numpy is absent from the sim Docker). Real-model logits are well separated so
-the argmax is robust (no synthetic gap-2 fragility).
+since numpy is absent from the sim Docker).
 
   make -f Makefile.gen MODULE=test_gen_F2
 """
@@ -23,7 +27,7 @@ LBASE, LSTRIDE = 0x010000, 0x010000
 A_RMSFINAL, A_EMB = 0x060000, 0x000000
 OFF = dict(rms_att=0x0000, wq=0x0100, wk=0x1100, wv=0x1900, wo=0x2100,
            rms_ffn=0x3100, w1=0x3200, w3=0x6200, w2=0x9200)
-DUMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "host", "gen_model_dump.json")
+DUMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "host", "gen_model_dump.json")
 
 
 def preload(sd, base, data):
@@ -64,32 +68,28 @@ def drive_shifts(dut, m):
     dut.sw_emb.value = m['tok_emb_s'] & 0xFF
 
 
-def drive_freq(dut, m):
-    # cos_q15[pos*64 + 16*p +: 16] = m['cos'][pos][p]  (4 values per position)
-    cosv = 0; sinv = 0
-    for pos in range(len(m['cos'])):
-        for p in range(HS//2):
-            cosv |= (m['cos'][pos][p] & 0xFFFF) << (pos*64 + 16*p)
-            sinv |= (m['sin'][pos][p] & 0xFFFF) << (pos*64 + 16*p)
-    dut.cos_q15.value = cosv
-    dut.sin_q15.value = sinv
+# drive_freq removed : rope freq_cis now baked into gen_seq's cos_rom/sin_rom
+# BSRAM (src/freq_cis_{cos,sin}.hex), no longer driven through cos_q15/sin_q15 ports.
 
 
 async def run_generation(dut, n_tok):
     with open(DUMP) as f:
         m = json.load(f)
-    expected = m['tokens'][1:1+n_tok]            # tokens[0]=1 is the input token
+    expected = m['node_tokens'][:n_tok]          # node-faithful reference (prove_gen_node)
 
     cocotb.start_soon(Clock(dut.clk, 37, units="ns").start())
     dut.rst_n.value = 0
     for s in ("start","gen_mode","x_in","sx_in","sw_rms","swq","swk","swv","swo","sw_rmsf",
-              "sw1","sw3","sw2","sw_rmsfinal","sw_emb","pos","cos_q15","sin_q15"):
+              "sw1","sw3","sw2","sw_rmsfinal","sw_emb","pos"):
         getattr(dut, s).value = 0
     await ClockCycles(dut.clk, 10)
 
-    preload_model(dut.u_sdram, m)
+    # Poids préchargés via $readmemh("sdram_preload.hex") dans sdram_chip.v
+    # (cocotb VPI ne persiste pas l'écriture dans le grand reg mem sous icarus).
+    # preload_model(dut.u_sdram, m)  # ancien chemin VPI, abandonné
     drive_shifts(dut, m)
-    drive_freq(dut, m)
+    # drive_freq removed : rope freq_cis now baked into gen_seq's cos_rom/sin_rom
+    # BSRAM (src/freq_cis_{cos,sin}.hex), no longer driven through ports.
 
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 5)

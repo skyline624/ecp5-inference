@@ -58,9 +58,16 @@ SOURCES = [
 def main() -> int:
     test_module = sys.argv[1] if len(sys.argv) > 1 else "test_gen_A"
     BUILD.mkdir(parents=True, exist_ok=True)
-    # Copy .hex LUTs (le piège $readmemh cwd).
+    # Copy .hex LUTs (le piège $readmemh cwd) vers BUILD ET SIM. cocotb/icarus
+    # lance vvp avec cwd=test_dir (=SIM), pas build_dir -> $readmemh("xxx.hex")
+    # cherche dans SIM. On copie donc dans les deux pour couvrir les deux CWD.
     for f in glob.glob(str(LUT / "*.hex")):
         shutil.copy(f, BUILD)
+        shutil.copy(f, SIM)
+    # Image SDRAM préchargée (poids du modèle) pour les tests de génération.
+    sdram_hex = SIM / "sdram_preload.hex"
+    if sdram_hex.exists():
+        shutil.copy(sdram_hex, BUILD)
 
     from cocotb_tools.runner import get_runner
     r = get_runner("icarus")
@@ -72,8 +79,13 @@ def main() -> int:
             always=True,
             timescale=("1ns", "1ps"),
             includes=[str(RTL)],
-            build_args=["-DLINK_SS"],
+            build_args=["-DLINK_SS", "-DSDRAM_PRELOAD"],
         )
+        # vvp résout $readmemh("xxx.hex") relativement à son CWD. cocotb/icarus
+        # lance vvp en héritant du CWD du process -> chdir vers BUILD (où les
+        # .hex ont été copiés) AVANT r.test(), sinon les LUT sont introuvables
+        # (rmsnorm/silu/rope/attention/exp/inv -> X -> forward nul -> argmax 0).
+        os.chdir(BUILD)
         r.test(
             hdl_toplevel=TOPLEVEL,
             test_module=test_module,

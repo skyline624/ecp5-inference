@@ -67,6 +67,23 @@ module sdram_chip #(
         for (i = 0; i < 4; i = i + 1) active_row[i] = {ROW_BITS{1'b0}};
     end
 
+    // Préchargement des poids du modèle en simulation. cocotb/icarus ne
+    // persiste pas l'écriture VPI dans ce grand `reg [31:0] mem [0:2M]` (cf
+    // diagnostic sim/test_sdram_preload.py) -> on charge une image hex via
+    // $readmemh, comme les LUT et le flash_boot silicium. Le fichier est produit
+    // par host/gen_sdram_preload_hex.py (mêmes offsets/packing que preload_model)
+    // et copié vers le CWD de vvp par server/sim/cocotb_runner.py. Activé par
+    // `-DSDRAM_PRELOAD` au build ; absent sinon (tests qui ne préchargent pas).
+`ifdef SDRAM_PRELOAD
+    initial begin
+        $display("SDRAM_PRELOAD: loading sdram_preload.hex");
+        $readmemh("sdram_preload.hex", mem);
+        $display("SDRAM_PRELOAD: loaded mem[0]=%h", mem[0]);
+    end
+`else
+    initial $display("SDRAM_PRELOAD: NOT defined (mem stays X)");
+`endif
+
     always @(posedge SDRAM_CLK) begin
         cmd = (SDRAM_CKE && !SDRAM_nCS) ? {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE}
                                         : CMD_NOP;

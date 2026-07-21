@@ -30,7 +30,7 @@ LBASE, LSTRIDE = 0x010000, 0x010000
 A_RMSFINAL, A_EMB = 0x060000, 0x000000
 OFF = dict(rms_att=0x0000, wq=0x0100, wk=0x1100, wv=0x1900, wo=0x2100,
            rms_ffn=0x3100, w1=0x3200, w3=0x6200, w2=0x9200)
-DUMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "host", "gen_model_dump.json")
+DUMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "host", "gen_model_dump.json")
 
 
 def preload(sd, base, data):
@@ -88,7 +88,9 @@ async def test_gen_F(dut):
         getattr(dut, s).value = 0
     await ClockCycles(dut.clk, 10)
 
-    preload_model(dut.u_sdram, m)
+    # Poids préchargés via $readmemh("sdram_preload.hex") dans sdram_chip.v
+    # (cocotb VPI ne persiste pas l'écriture dans le grand reg mem sous icarus).
+    # preload_model(dut.u_sdram, m)  # ancien chemin VPI, abandonné
     drive_shifts(dut, m)
 
     dut.rst_n.value = 1
