@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from . import config, env
-from .rtl import extract, graphviz_svg, pipeline as rtl_pipeline, memory as rtl_memory
+from .rtl import extract, graphviz_svg, pipeline as rtl_pipeline, memory as rtl_memory, cluster as rtl_cluster
 from .sim import runner as sim_runner
 from .sim import tb_registry
 from .vcd import events as vcd_events
@@ -92,6 +92,20 @@ def api_memory() -> dict:
 def api_memory_svg() -> Response:
     """SVG de la carte mémoire (rendu Graphviz). ids `mem:*`/`flow:*` pour le frontend."""
     svg = rtl_memory.memory_svg()
+    return Response(content=svg, media_type="image/svg+xml")
+
+
+@app.get("/api/cluster")
+def api_cluster() -> dict:
+    """Cluster 2× i9 (tensor-parallel + ss_link) + trafic all-gather/all-reduce.
+    ids `node:*`/`flow:*`/`sslink:*` + `link_activity` pour l'animation."""
+    return rtl_cluster.cluster_json()
+
+
+@app.get("/api/cluster_svg")
+def api_cluster_svg() -> Response:
+    """SVG du cluster (rendu Graphviz). ids `node:*`/`flow:*`/`sslink:*`."""
+    svg = rtl_cluster.cluster_svg()
     return Response(content=svg, media_type="image/svg+xml")
 
 

@@ -148,3 +148,12 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
 .pt-mem-chip[data-tier="flash"] { background: #dc8a78; }
 .pt-mem-chip[data-tier="sdram"] { background: #cba6f7; }
 .pt-mem-chip[data-tier="bram"]  { background: #94e2d5; }
+
+/* Vue Cluster (Phase D) : ss_link animé + swatches. */
+.pt-leg-swatch.pt-phase-node { border-color: #a6e3a1; background: rgba(166,227,161,0.25); }
+.pt-leg-swatch.pt-phase-link { border-color: #f38ba8; background: rgba(243,139,168,0.25); }
+/* dashes qui coulent le long de l'edge ss_link quand le trafic est actif. */
+@keyframes pt-flow { to { stroke-dashoffset: -14; } }
+.pt-link-active { stroke: #f38ba8 !important; stroke-width: 2.6 !important;
+  stroke-dasharray: 7 5 !important; animation: pt-flow 0.7s linear infinite; }
+.pt-link-active + text, .pt-link-active text { fill: #f38ba8 !important; font-weight: 600; }

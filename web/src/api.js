@@ -45,6 +45,19 @@ export async function getMemorySvg() {
   return r.text();
 }
 
+// --- Cluster 2× i9 (vue Cluster) ---
+export async function getCluster() {
+  const r = await fetch(`${BASE}/cluster`);
+  if (!r.ok) throw new Error(`cluster: ${r.status}`);
+  return r.json();
+}
+
+export async function getClusterSvg() {
+  const r = await fetch(`${BASE}/cluster_svg`);
+  if (!r.ok) throw new Error(`cluster_svg: ${r.status}`);
+  return r.text();
+}
+
 // --- Phase B : simulation / VCD ---
 
 export async function listTbs() {

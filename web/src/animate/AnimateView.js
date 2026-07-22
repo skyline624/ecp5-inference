@@ -15,6 +15,7 @@
 import svgPanZoom from 'svg-pan-zoom';
 import { runSim, simStatus, simTimeline, getPipeline, getPipelineSvg } from '../api.js';
 import { cssEscape } from '../graph/GraphView.js';
+import { NLAYERS, NTOKENS, buildDemo } from '../pipeline/timeline.js';
 
 const TB = 'tb_node';
 const TB_PREFIX = 'tb_node.u_dut.';
@@ -47,44 +48,10 @@ function stepOf(st, phase, lp) {
   return null;
 }
 
-// --- Démo synthétique (modèle de timing du design, durées relatives) ---
-// (étape, ticks d'animation) pour 1 token ; la couche est répétée ×5.
-const LAYER = [
-  ['rms_att', 6], ['qkv', 12], ['rope', 4], ['kvwrite', 3], ['attn', 10],
-  ['wo', 10], ['resid1', 2], ['rms_ffn', 6], ['ffn_up', 12], ['silu', 4],
-  ['ffn_down', 10], ['resid2', 2],
-];
-const NLAYERS = 5;
-const NTOKENS = 17;
-const ONE_TOKEN = [
-  ['prompt', 3], ['embed', 8],
-  ...Array(NLAYERS).fill(LAYER).flat(),
-  ['rms_final', 6], ['lm_head', 16], ['argmax', 8], ['token', 3],
-];
-
-// Déroule la démo : stepAtCycle[i] + meta (token, layer) par cycle.
-function buildDemo() {
-  const stepAt = [];
-  const tokAt = [];
-  // Boot (power-up, 1×) : flash -> SDRAM, avant le 1er token. tok = -1.
-  const BOOT_TICKS = 30;
-  for (let k = 0; k < BOOT_TICKS; k++) { stepAt.push('boot'); tokAt.push(-1); }
-  for (let t = 0; t < NTOKENS; t++) {
-    for (const [step, ticks] of ONE_TOKEN) {
-      for (let k = 0; k < ticks; k++) { stepAt.push(step); tokAt.push(t); }
-    }
-  }
-  // couche = -1 hors-bloc, sinon 0..4 ; on compte les passages rms_att.
-  const layAt = new Array(stepAt.length);
-  let layer = -1;
-  for (let i = 0; i < stepAt.length; i++) {
-    const s = stepAt[i];
-    if (s === 'boot' || s === 'prompt' || s === 'embed') layer = -1;
-    else if (s === 'rms_att') layer = (layer + 1) % NLAYERS;
-    layAt[i] = layer;
-  }
-  return { stepAt, tokAt, layAt };
-}
+// --- Démo synthétique : modèle de timing du design (durées relatives) ---
+// Factored dans ../pipeline/timeline.js (partagé avec la vue Cluster pour
+// l'animation synchronisée du trafic ss_link). NLAYERS/NTOKENS/LAYER/ONE_TOKEN
+// + buildDemo() importés en tête de fichier.
 
 export class AnimateView {
   constructor(root) {

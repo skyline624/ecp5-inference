@@ -13,6 +13,7 @@ import { TimelineView } from './timeline/TimelineView.js';
 import { AnimateView } from './animate/AnimateView.js';
 import { PipelineView } from './pipeline/PipelineView.js';
 import { MemoryView } from './memory/MemoryView.js';
+import { ClusterView } from './cluster/ClusterView.js';
 
 const app = document.getElementById('app');
 
@@ -22,6 +23,7 @@ bar.innerHTML = `
   <button class="pt-tab active" data-view="graph">Graphe RTL</button>
   <button class="pt-tab" data-view="pipeline">Flux pipeline</button>
   <button class="pt-tab" data-view="memory">Mémoires</button>
+  <button class="pt-tab" data-view="cluster">Cluster</button>
   <button class="pt-tab" data-view="timeline">Timeline VCD</button>
   <button class="pt-tab" data-view="animate">Animate</button>`;
 app.before(bar);
@@ -42,7 +44,7 @@ window.ptState = state;
 // Une div par vue, toutes créées au boot (vides, cachées sauf graph). La vue
 // elle-même n'est instanciée qu'au premier switchView (lazy) -> son panZoom
 // naît dans un conteneur visible (hauteur non nulle).
-const ctors = { graph: GraphView, pipeline: PipelineView, memory: MemoryView, timeline: TimelineView, animate: AnimateView };
+const ctors = { graph: GraphView, pipeline: PipelineView, memory: MemoryView, cluster: ClusterView, timeline: TimelineView, animate: AnimateView };
 const panels = {};
 const views = {};
 for (const name of Object.keys(ctors)) {
