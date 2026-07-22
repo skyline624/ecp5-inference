@@ -62,6 +62,10 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
 .pt-phase-mac   :is(polygon, ellipse, rect) { fill: rgba(166,227,161,0.22) !important; stroke: #a6e3a1 !important; }
 .pt-phase-clk   :is(polygon, ellipse, rect) { fill: rgba(148,226,213,0.22) !important; stroke: #94e2d5 !important; }
 .pt-phase-boot  :is(polygon, ellipse, rect) { fill: rgba(220,138,120,0.22) !important; stroke: #dc8a78 !important; }
+/* tiers mémoire (vue Mémoires) : flash = brick, sdram = mauve, bram = teal */
+.pt-phase-flash :is(polygon, ellipse, rect) { fill: rgba(220,138,120,0.22) !important; stroke: #dc8a78 !important; }
+.pt-phase-sdram :is(polygon, ellipse, rect) { fill: rgba(203,166,247,0.22) !important; stroke: #cba6f7 !important; }
+.pt-phase-bram  :is(polygon, ellipse, rect) { fill: rgba(148,226,213,0.22) !important; stroke: #94e2d5 !important; }
 /* conteneurs (u_n, top) : neutre, pas de fill teinté */
 .pt-phase-node  :is(polygon, ellipse, rect), .pt-phase-top :is(polygon, ellipse, rect) {
   fill: rgba(205,214,244,0.06) !important; stroke: #585b70 !important; stroke-dasharray: 4 3 !important;
@@ -90,6 +94,9 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
 .pt-leg-swatch.pt-phase-mac  { border-color: #a6e3a1; background: rgba(166,227,161,0.25); }
 .pt-leg-swatch.pt-phase-clk  { border-color: #94e2d5; background: rgba(148,226,213,0.25); }
 .pt-leg-swatch.pt-phase-boot { border-color: #dc8a78; background: rgba(220,138,120,0.25); }
+.pt-leg-swatch.pt-phase-flash { border-color: #dc8a78; background: rgba(220,138,120,0.25); }
+.pt-leg-swatch.pt-phase-sdram { border-color: #cba6f7; background: rgba(203,166,247,0.25); }
+.pt-leg-swatch.pt-phase-bram  { border-color: #94e2d5; background: rgba(148,226,213,0.25); }
 .pt-leg-flow { color: var(--muted); line-height: 1.45; border-top: 1px solid #45475a; padding-top: 5px; }
 .pt-leg-flow b { color: var(--hl); }
 

@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from . import config, env
-from .rtl import extract, graphviz_svg, pipeline as rtl_pipeline
+from .rtl import extract, graphviz_svg, pipeline as rtl_pipeline, memory as rtl_memory
 from .sim import runner as sim_runner
 from .sim import tb_registry
 from .vcd import events as vcd_events
@@ -79,6 +79,19 @@ def api_pipeline() -> dict:
 def api_pipeline_svg() -> Response:
     """SVG du dataflow (rendu Graphviz). ids `step:*`/`vec:*` pour le frontend."""
     svg = rtl_pipeline.pipeline_svg()
+    return Response(content=svg, media_type="image/svg+xml")
+
+
+@app.get("/api/memory")
+def api_memory() -> dict:
+    """Carte mémoire 3 tiers (flash/SDRAM/BRAM) + régions + flux. Définition fixe."""
+    return rtl_memory.memory_json()
+
+
+@app.get("/api/memory_svg")
+def api_memory_svg() -> Response:
+    """SVG de la carte mémoire (rendu Graphviz). ids `mem:*`/`flow:*` pour le frontend."""
+    svg = rtl_memory.memory_svg()
     return Response(content=svg, media_type="image/svg+xml")
 
 

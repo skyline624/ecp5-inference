@@ -32,6 +32,19 @@ export async function getPipelineSvg() {
   return r.text();
 }
 
+// --- Carte mémoire 3 tiers (vue Mémoires) ---
+export async function getMemory() {
+  const r = await fetch(`${BASE}/memory`);
+  if (!r.ok) throw new Error(`memory: ${r.status}`);
+  return r.json();
+}
+
+export async function getMemorySvg() {
+  const r = await fetch(`${BASE}/memory_svg`);
+  if (!r.ok) throw new Error(`memory_svg: ${r.status}`);
+  return r.text();
+}
+
 // --- Phase B : simulation / VCD ---
 
 export async function listTbs() {
