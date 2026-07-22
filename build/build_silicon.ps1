@@ -22,6 +22,7 @@ $Extra = (@(
     "../src/flash_boot.v",      # autonomous W25Q64 flash->SDRAM boot (ifdef FLASH_BOOT)
     "../src/wcache_ffn.v",       # cache FFN BRAM (instancie u_wc sous FLASH_BOOT, etape 3)
     "../src/gen_seq.v",
+    "../src/kv_cdc.v",     # CDC clk<->clk_sys pour le maître KV SDRAM (étape 1)
     "../src/async_fifo.v",
     "../src/uart_bridge.v",      # rx8_link / tx8_link (used by `top` under LINK_SS)
     "../src/uart_rx_8n1.v",       # UART PHY used by gen_seq_silicon.v host UART
@@ -40,6 +41,10 @@ $Extra = (@(
 # l'etape 1 perf : gen_seq_silicon.u_n reference le port clk_sys_out qui n'existe qu'en
 # CLUSTER_NODE. Sans ce define : yosys ERROR "Module top ... does not have a port
 # named 'clk_sys_out'".
-$args = @("-Top","gen_seq_silicon","-Extra",$Extra,"-Defines","NODE_ONLY,FLASH_BOOT,CLUSTER_NODE")
-if ($Flash) { $args += "-Flash" }
-& "$PSScriptRoot\build.ps1" @args
+# Appel build.ps1 avec params nommés explicites (le splatting @args est non fiable
+# en PS 5.1 : -Top est traité comme valeur positionnelle -> $Top="-Top", synth cassée).
+if ($Flash) {
+    & "$PSScriptRoot\build.ps1" -Top gen_seq_silicon -Extra $Extra -Defines "NODE_ONLY,FLASH_BOOT,CLUSTER_NODE" -Flash
+} else {
+    & "$PSScriptRoot\build.ps1" -Top gen_seq_silicon -Extra $Extra -Defines "NODE_ONLY,FLASH_BOOT,CLUSTER_NODE"
+}

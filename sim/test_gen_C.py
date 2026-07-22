@@ -56,7 +56,7 @@ async def test_gen_C(dut):
     cocotb.start_soon(Clock(dut.clk, 37, units="ns").start())
     dut.rst_n.value = 0; dut.start.value = 0
     for s in ("x_in","sx_in","sw_rms","swq","swk","swv","swo",
-              "sw_rmsf","sw1","sw3","sw2","pos","cos_q15","sin_q15"):
+              "sw_rmsf","sw1","sw3","sw2","pos"):
         getattr(dut, s).value = 0
     await ClockCycles(dut.clk, 10)
 
@@ -106,8 +106,6 @@ async def test_gen_C(dut):
     dut.sw_rmsf.value = swrf & 0xFF
     dut.sw1.value = sw1 & 0xFF; dut.sw3.value = sw3 & 0xFF; dut.sw2.value = sw2 & 0xFF
     dut.pos.value = 0
-    dut.cos_q15.value = vint(b"".join(int.to_bytes(to_q15(c) & 0xFFFF, 2, "little") for c in cos))
-    dut.sin_q15.value = vint(b"".join(int.to_bytes(to_q15(s) & 0xFFFF, 2, "little") for s in sin))
     dut.start.value = 1
     await RisingEdge(dut.clk); dut.start.value = 0
 

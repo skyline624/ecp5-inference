@@ -137,7 +137,7 @@ async def test_gen_E(dut):
     cocotb.start_soon(Clock(dut.clk, 37, units="ns").start())
     dut.rst_n.value = 0; dut.start.value = 0
     for s in ("gen_mode","x_in","sx_in","sw_rms","swq","swk","swv","swo","sw_rmsf","sw1","sw3","sw2",
-              "sw_rmsfinal","sw_emb","pos","cos_q15","sin_q15"):
+              "sw_rmsfinal","sw_emb","pos"):
         getattr(dut, s).value = 0
     await ClockCycles(dut.clk, 10)
 
@@ -191,8 +191,6 @@ async def test_gen_E(dut):
     dut.sw1.value = pack(sh['w1']); dut.sw3.value = pack(sh['w3']); dut.sw2.value = pack(sh['w2'])
     dut.sw_rmsfinal.value = srmf & 0xFF; dut.sw_emb.value = semb & 0xFF
     dut.pos.value = 0
-    dut.cos_q15.value = vint(b"".join(int.to_bytes(int(max(-32768,min(32767,round(c*32768.0))))&0xFFFF,2,"little") for c in cos))
-    dut.sin_q15.value = vint(b"".join(int.to_bytes(int(max(-32768,min(32767,round(s*32768.0))))&0xFFFF,2,"little") for s in sin))
     dut.start.value = 1
     await RisingEdge(dut.clk); dut.start.value = 0
 

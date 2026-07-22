@@ -31,6 +31,8 @@ sim/sim_build_v2/*.vh
 __pycache__/
 *.pyc
 *.pyo
+# ---- host generated oracle dumps (regenerable via prove_gen_node.py) ----
+host/*.npz
 .pytest_cache/
 .mypy_cache/
 

@@ -39,6 +39,11 @@ VERILOG_SOURCES += $(abspath ../src/gen_seq.v)
 VERILOG_SOURCES += $(abspath ../src/gen_seq_top.v)
 
 COMPILE_ARGS += -DLINK_SS
+# Précharge sdram_preload.hex dans sdram_chip.v ($readmemh) au build. Nécessaire
+# pour test_gen_F/F2 (cocotb VPI ne persiste pas l'écriture dans le grand reg mem
+# sous icarus) -> sinon SDRAM vide -> argmax=0 -> tous tokens=0. Les tests A..E
+# préchargent leurs propres poids par VPI qui écrase ces zones au runtime.
+COMPILE_ARGS += -DSDRAM_PRELOAD
 COMPILE_ARGS += -I$(RTL)
 
 TOPLEVEL := gen_seq_top

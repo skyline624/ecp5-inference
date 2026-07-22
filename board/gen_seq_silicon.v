@@ -150,6 +150,15 @@ module gen_seq_silicon #(
     wire s_cmd_full = run_mode ? cmd_full : 1'b1;
     wire s_resp_empty = run_mode ? resp_empty : 1'b1;  // gen_seq never reads in LOAD
 
+    // ---- KV cache SDRAM maître (étape 1) : le seq (clk 25 MHz) est le 4e maître
+    // du mux node_top (clk_sys 31.25 MHz). kv_cci fait la CDC clk<->clk_sys :
+    // toggle synchronizer pour les requêtes (rd/wr/refresh pulse 1-cycle), 2-FF
+    // pour busy + dout. Pas de pin externe (tout on-chip). ----
+    wire [22:0] s_kv_addr;  wire s_kv_rd, s_kv_wr;  wire [7:0] s_kv_din;
+    wire [7:0]  s_kv_dout;  wire s_kv_busy;          wire s_kv_refresh;
+    wire [22:0] n_kv_addr;  wire n_kv_rd, n_kv_wr;  wire [7:0] n_kv_din;
+    wire        n_kv_refresh; wire [7:0] n_sd_dout;  wire n_sd_busy;
+
     gen_seq #(.W(W), .D(D), .NL(NL), .NPOS(NPOS), .NPR(NPR)) u_seq (
         .clk(clk), .rst_n(rst_n & seq_rst_n), .start(start_pulse), .gen_mode(1'b1),
         .x_in({W*D{1'b0}}), .sx_in(8'sd0),
@@ -161,7 +170,10 @@ module gen_seq_silicon #(
         .lk_cmd_data(s_cmd_data), .lk_cmd_wr(s_cmd_wr), .lk_cmd_full(s_cmd_full),
         .lk_resp_data(s_resp_data), .lk_resp_empty(s_resp_empty), .lk_resp_rd(s_resp_rd),
         .result(result), .result_sh(result_sh), .token(token),
-        .token_valid(token_valid), .done(done));
+        .token_valid(token_valid), .done(done),
+        // KV SDRAM maître direct (étape 1) : CDC vers le node (clk_sys)
+        .kv_addr(s_kv_addr), .kv_rd(s_kv_rd), .kv_wr(s_kv_wr), .kv_din(s_kv_din),
+        .kv_dout(s_kv_dout), .kv_busy(s_kv_busy), .kv_refresh(s_kv_refresh));
 
     async_fifo #(.DW(8), .AW(4)) u_cmd (
         .wclk(clk), .wrst_n(rst_n), .winc(cmd_wr), .wdata(cmd_wdata), .wfull(cmd_full),
@@ -177,6 +189,7 @@ module gen_seq_silicon #(
     localparam H_IDLE=4'd0, H_FWD=4'd1, H_S=4'd2, H_SH=4'd3, H_G=4'd4, H_GK=4'd5, H_R=4'd6,
                H_PR=4'd7, H_PRLEN=4'd8, H_PRDATA=4'd9;
     reg [3:0] host_state = H_IDLE;
+    reg       run_rr_seen = 1'b0;   // RUN mode : 1er 'R' de RR vu (persiste jusqu'au 2e)
     wire is_pt = (rx_byte==8'h4C)|(rx_byte==8'h57)|(rx_byte==8'h42)|(rx_byte==8'h43); // L W B C
     wire fwd_accept = rx_valid & ((host_state==H_FWD) | (host_state==H_IDLE & is_pt));
     reg [7:0] fwd_buf;  reg fwd_pending;
@@ -249,6 +262,7 @@ module gen_seq_silicon #(
     always @(posedge clk) begin
         if (!rst_n) begin
             host_state <= H_IDLE; run_mode <= 1'b0; start_pulse <= 1'b0; seq_rst_n <= 1'b1;
+            run_rr_seen <= 1'b0;
             sh_cnt <= 7'd0; sh_lyr <= 3'd0; sh_tab <= 4'd0;
             ack_go <= 1'b0; a_sel_next <= 1'b0; a_b0c <= 8'd0; a_b1c <= 8'd0; a_drain <= 16'd2;
             fwd_op1 <= 8'd0; fwd_idx <= 4'd0; cc_n0 <= 8'd0;
@@ -281,9 +295,26 @@ module gen_seq_silicon #(
 `endif
             if (run_mode) begin
                 // RUN : host FSM idle (host read-only); token packer drives u_tx.
-                host_state <= H_IDLE; start_pulse <= 1'b0; ack_go <= 1'b0;
+                // Exception RR : permet de repasser en LOAD mode sans power-cycle
+                // (debug étape 1 -> CC-read du KV SDRAM via sd_addr après génération,
+                // pour distinguer bug write vs bug read du path kv_* CDC). Le seq est
+                // reset (seq_rst_n=0) -> SDRAM préservée (volatile mais ~64ms/row).
+                // run_rr_seen persiste entre les 2 bytes 'R' (séparés de ~250 clk à
+                // 1Mbaud) car host_state est forcé H_IDLE hors réception en RUN.
+                start_pulse <= 1'b0;
+                if (rx_valid && rx_byte==8'h52 && run_rr_seen) begin
+                    run_mode <= 1'b0; seq_rst_n <= 1'b0; host_state <= H_IDLE;
+                    ack_go <= 1'b1; a_sel_next <= 1'b0; a_drain <= 16'd2;
+                    a_b0c <= 8'h52; a_b1c <= 8'h4B; run_rr_seen <= 1'b0;
+                end else if (rx_valid && rx_byte==8'h52) begin
+                    run_rr_seen <= 1'b1; ack_go <= 1'b0; host_state <= H_IDLE;
+                end else if (rx_valid) begin
+                    run_rr_seen <= 1'b0; ack_go <= 1'b0; host_state <= H_IDLE;
+                end else begin
+                    ack_go <= 1'b0; host_state <= H_IDLE;   // hold run_rr_seen
+                end
             end else begin
-            start_pulse <= 1'b0; ack_go <= 1'b0;
+            start_pulse <= 1'b0; ack_go <= 1'b0; run_rr_seen <= 1'b0;
             case (host_state)
                 H_IDLE: if (rx_valid) begin
                     case (rx_byte)
@@ -450,7 +481,11 @@ module gen_seq_silicon #(
         .lk_tx_data(r_wdata), .lk_tx_wr(r_wr), .lk_tx_full(r_full), .led(node_led),
         .O_sdram_clk(O_sdram_clk),
         .O_sdram_cas_n(O_sdram_cas_n), .O_sdram_ras_n(O_sdram_ras_n), .O_sdram_wen_n(O_sdram_wen_n),
-        .IO_sdram_dq(IO_sdram_dq), .O_sdram_addr(O_sdram_addr), .O_sdram_ba(O_sdram_ba)
+        .IO_sdram_dq(IO_sdram_dq), .O_sdram_addr(O_sdram_addr), .O_sdram_ba(O_sdram_ba),
+        // KV maître (étape 1) : le seq est le 4e maître du mux eff_*. Le node
+        // expose kv_* hors ifdef ; ici (silicium, FLASH_BOOT) on câble la CDC.
+        .kv_addr(n_kv_addr), .kv_rd(n_kv_rd), .kv_wr(n_kv_wr), .kv_din(n_kv_din),
+        .kv_refresh(n_kv_refresh), .kv_dout(n_sd_dout), .kv_busy(n_sd_busy)
 `ifdef FLASH_BOOT
         ,.flash_sck(flash_sck_int), .flash_mosi(flash_mosi),
         .flash_miso(flash_miso), .flash_cs_n(flash_cs_n),
@@ -460,4 +495,21 @@ module gen_seq_silicon #(
 `endif
     );
     assign led = node_led;
+
+    // ---- KV cache CDC : seq (clk 25 MHz) <-> node (clk_sys 31.25 MHz) ----
+    // Le seq pulse kv_rd/kv_wr/kv_refresh 1 cycle clk puis attend kv_busy. Le
+    // contrôleur SDRAM du node est sur clk_sys et attend un pulse 1-cycle en IDLE
+    // (un niveau maintenu re-déclencherait l'op). D'où : toggle synchronizer pour
+    // la requête (1 cycle clk -> 1 cycle clk_sys), 2-FF pour busy et dout (staging
+    // égal -> dout valide le cycle où s_kv_busy tombe). Le seq tient kv_addr/kv_din
+    // stables jusqu'après !busy, donc addr/din multi-bits échantillonnés direct sur
+    // clk_sys au cycle du pulse synchronisé (stable depuis plusieurs clk_sys).
+    kv_cdc u_kvcdc (
+        .clk(clk), .clk_sys(clk_sys), .rst_n(rst_n),
+        .s_kv_addr(s_kv_addr), .s_kv_rd(s_kv_rd), .s_kv_wr(s_kv_wr),
+        .s_kv_din(s_kv_din), .s_kv_refresh(s_kv_refresh),
+        .s_kv_dout(s_kv_dout), .s_kv_busy(s_kv_busy),
+        .n_kv_addr(n_kv_addr), .n_kv_rd(n_kv_rd), .n_kv_wr(n_kv_wr),
+        .n_kv_din(n_kv_din), .n_kv_refresh(n_kv_refresh),
+        .n_sd_dout(n_sd_dout), .n_sd_busy(n_sd_busy));
 endmodule

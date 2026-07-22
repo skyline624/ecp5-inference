@@ -412,7 +412,7 @@ def forward_node(m, n_tokens=17):
         best_idx, _ = argmax_lm_head(logits, csh)
         out.append(int(best_idx))
         cur_tok = int(best_idx)
-    return out
+    return out, kmem, vmem, ksh, vsh
 
 
 # ---- Main : gate 1 offline ---------------------------------------------------
@@ -427,7 +427,7 @@ def main():
     m = build_quantized_model(m_float)
 
     print("Forward nœud int8 bit-exact (17 tokens)...")
-    node_tokens = forward_node(m, 17)
+    node_tokens, kmem, vmem, ksh, vsh = forward_node(m, 17)
     print(f"  node_tokens = {node_tokens}")
 
     oracle = forward_ref(m_float, 17)
@@ -442,6 +442,13 @@ def main():
         print("  ==> GATE 1 PASS : nœud bit-exact, 9 premiers == oracle, token 9 == 268.")
     else:
         print("  ==> GATE 1 FAIL : revoir les operateurs.")
+
+    # Dump KV oracle (kmem/vmem/ksh/vsh) pour comparaison silicium étape 1
+    # (CC-read du KV SDRAM via sd_addr après génération + RR).
+    import os
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kv_oracle.npz")
+    np.savez(out_path, kmem=kmem, vmem=vmem, ksh=ksh, vsh=vsh, node_tokens=np.array(node_tokens))
+    print(f"  KV oracle dumpé : {out_path}  (kmem/vmem shape={kmem.shape})")
 
 
 if __name__ == "__main__":

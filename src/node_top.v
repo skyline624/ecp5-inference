@@ -108,7 +108,19 @@ module top #(
     output wire        O_sdram_wen_n,
     inout  wire [31:0] IO_sdram_dq,
     output wire [10:0] O_sdram_addr,
-    output wire [1:0]  O_sdram_ba
+    output wire [1:0]  O_sdram_ba,
+    // ---- KV cache maître SDRAM direct (étape 1, plan §2.2) ----
+    // Le gen_seq est 4e maître du bus SDRAM (fenêtres disjointes : PH_MM/KVWR
+    // pendant que le node calcule l'attention). En sim gen_seq_top, ces ports sont
+    // câblés à 0 (le seq a sa 2e SDRAM dédiée) -> le mux eff_* reste node-only comme
+    // avant. En silicium (gen_seq_silicon, 1.1d), ils sont câblés au seq (CDC clk/sys).
+    input  wire [22:0] kv_addr,
+    input  wire        kv_rd,
+    input  wire        kv_wr,
+    input  wire [7:0]  kv_din,
+    input  wire        kv_refresh,     // seq pulse un refresh SDRAM (~15µs sur bus KV)
+    output wire [7:0]  kv_dout,        // = sd_dout (le seq lit le même contrôleur)
+    output wire        kv_busy         // = sd_busy
 `ifdef FLASH_BOOT
     ,output wire       flash_sck       // SPI SCK   (pad MCLK/U3 via USRMCLK in wrapper)
     ,output wire       flash_mosi      // SPI MOSI  (pin W2)
@@ -330,26 +342,45 @@ module top #(
                      .raddr(cache_addr), .rdata(wcache_dout),
                      .waddr(wc_waddr), .wdata(wc_wdata), .we(wc_we));
     // mux eff_* : priorite booting > wcache_filling > node
+    // mux eff_* : priorite booting > wcache_filling > kv_firing (seq) > node.
+    // kv_firing = le seq tient le bus KV (rd|wr) ; kv_refresh = refresh auto du seq.
+    // Fenêtres disjointes : PH_MM/KVWR (seq) pendant que le node calcule l'attention
+    // (pas d'accès SDRAM du node), donc pas de contention réelle. kv_refresh prioritaire
+    // sur sd_refresh (le seq pulse ~15µs ; le node refresh pendant ses propres phases).
+    wire        kv_firing = kv_rd | kv_wr;
     wire [22:0] eff_addr = booting        ? boot_addr   :
-                           wcache_filling ? wca_sd_addr : sd_addr;
+                          wcache_filling ? wca_sd_addr :
+                          kv_firing      ? kv_addr     : sd_addr;
     wire        eff_rd   = booting        ? 1'b0        :
-                           wcache_filling ? wca_sd_rd   : sd_rd;
-    wire        eff_wr   = booting ? boot_wr : sd_wr;          // wcache_fill n'écrit pas SDRAM
-    wire [7:0]  eff_din  = booting ? boot_din : sd_din;
+                          wcache_filling ? wca_sd_rd   :
+                          kv_firing      ? kv_rd       : sd_rd;
+    wire        eff_wr   = booting        ? boot_wr     :
+                          wcache_filling ? 1'b0        :   // wcache_fill n'écrit pas SDRAM
+                          kv_firing      ? kv_wr       : sd_wr;
+    wire [7:0]  eff_din  = booting        ? boot_din    :
+                          wcache_filling ? sd_din     :   // wcache ne write pas (peu importe)
+                          kv_firing      ? kv_din     : sd_din;
     wire        eff_ref  = booting        ? boot_ref    :
-                           wcache_filling ? wca_refresh : sd_refresh;
+                          wcache_filling ? wca_refresh :
+                          kv_refresh     ? 1'b1        : sd_refresh;
 `else
     wire        booting  = 1'b0;
     wire        wcache_filling   = 1'b0;
     wire        wcache_fill_done = 1'b0;
     wire        is_ffn_addr      = 1'b0;
     wire [7:0]  wcache_dout      = 8'd0;
-    wire [22:0] eff_addr = sd_addr;
-    wire        eff_rd   = sd_rd;
-    wire        eff_wr   = sd_wr;
-    wire [7:0]  eff_din  = sd_din;
-    wire        eff_ref  = sd_refresh;
+    // KV maître (étape 1) : en sim non-FLASH_BOOT, kv_* câblés à 0 -> kv_firing=0,
+    // kv_refresh=0 -> eff_* = sd_* (node-only, comme avant ; le seq a sa 2e SDRAM).
+    wire        kv_firing = kv_rd | kv_wr;
+    wire [22:0] eff_addr = kv_firing ? kv_addr : sd_addr;
+    wire        eff_rd   = kv_firing ? kv_rd   : sd_rd;
+    wire        eff_wr   = kv_firing ? kv_wr   : sd_wr;
+    wire [7:0]  eff_din  = kv_firing ? kv_din  : sd_din;
+    wire        eff_ref  = kv_refresh ? 1'b1   : sd_refresh;
 `endif
+    // le seq lit le même contrôleur SDRAM : dout/busy partagés.
+    assign kv_dout = sd_dout;
+    assign kv_busy = sd_busy;
 
     sdram #(.FREQ(31_250_000)) u_sdram (
         .clk(clk_sys), .clk_sdram(clk_sdram), .resetn(rst_n),
