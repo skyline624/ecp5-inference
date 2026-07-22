@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from . import config, env
-from .rtl import extract, graphviz_svg
+from .rtl import extract, graphviz_svg, pipeline as rtl_pipeline
 from .sim import runner as sim_runner
 from .sim import tb_registry
 from .vcd import events as vcd_events
@@ -66,6 +66,19 @@ def api_graph_svg(top: str) -> Response:
     if top not in _get_rtl().modules:
         raise HTTPException(404, f"top module '{top}' inconnu")
     svg = graphviz_svg.graph_svg(_get_graph(top))
+    return Response(content=svg, media_type="image/svg+xml")
+
+
+@app.get("/api/pipeline")
+def api_pipeline() -> dict:
+    """Dataflow d'un token (étapes + vecteurs). Définition fixe du design."""
+    return rtl_pipeline.pipeline_json()
+
+
+@app.get("/api/pipeline_svg")
+def api_pipeline_svg() -> Response:
+    """SVG du dataflow (rendu Graphviz). ids `step:*`/`vec:*` pour le frontend."""
+    svg = rtl_pipeline.pipeline_svg()
     return Response(content=svg, media_type="image/svg+xml")
 
 

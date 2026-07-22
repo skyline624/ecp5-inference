@@ -52,6 +52,17 @@ def _escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+# Communications runtime (edges logiques entre modules frères) : style distinct
+# du graphe de contenance (pointillés, couleur par kind, constraint=false pour
+# ne pas perturber le layout hiérarchique). Id `comm:...` côté frontend.
+COMM_STYLE = {
+    "cmd":  ("#89b4fa", "dashed"),   # bleu  — FIFO commandes
+    "resp": ("#a6e3a1", "dashed"),  # vert  — FIFO réponses
+    "link": ("#f38ba8", "dotted"),  # rose  — ss_link série
+    "boot": ("#fab387", "dotted"),  # orange— boot flash
+}
+
+
 def _build_cluster_tree(modules: Dict[str, dict]) -> Tuple[Tuple[str, ...], _CTreeNode, List[dict]]:
     """Construit l'arbre des clusters. Retourne (root_cluster_path, root_node, top_level_nodes)."""
     root = _CTreeNode(())
@@ -108,7 +119,7 @@ def generate_dot(graph: dict) -> str:
         lines.append("  " + _node_dot(m, fill="#cfe8ff"))
     # clusters
     _emit_cluster(ctree, lines, depth=0)
-    # edges
+    # edges (contenance parent→child)
     mod_by_hier = modules
     for e in edges:
         fid = mod_by_hier[e["from"]]["id"]
@@ -116,6 +127,14 @@ def generate_dot(graph: dict) -> str:
         label = ", ".join(e["buses"]) if e["buses"] else ""
         lbl = f'label="{_escape(label)}"' if label else ""
         lines.append(f'  "{fid}" -> "{tid}" [{lbl} id="{e["id"]}"];')
+    # communications runtime (frères) : pointillés, couleur par kind, hors-layout
+    for e in graph.get("comm_edges", []):
+        fid = mod_by_hier[e["from"]]["id"]
+        tid = mod_by_hier[e["to"]]["id"]
+        color, style = COMM_STYLE.get(e["kind"], ("#585b70", "dashed"))
+        lines.append(f'  "{fid}" -> "{tid}" [label="{_escape(e["label"])}", '
+                     f'id="{e["id"]}", color="{color}", style="{style}", '
+                     f'fontcolor="{color}", constraint=false, penwidth=1.4];')
     lines.append("}")
     return "\n".join(lines)
 

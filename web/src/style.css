@@ -40,6 +40,59 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
 .pt-edge-hl { stroke: var(--edge-hl) !important; stroke-width: 2.2 !important; }
 .pt-edge-hl + text, .pt-edge-hl text { fill: var(--edge-hl) !important; }
 
+/* Phase C : coloration d'activité (AnimateView). Remplit les boîtes modules
+   actifs au cycle courant (vert accent) + edges actifs. */
+.pt-active :is(polygon, ellipse, rect) {
+  fill: rgba(166, 227, 161, 0.32) !important;
+  stroke: #a6e3a1 !important; stroke-width: 2.4 !important;
+}
+.pt-active text { fill: #a6e3a1 !important; font-weight: 600; }
+.pt-active-edge { stroke: #a6e3a1 !important; stroke-width: 2.2 !important; }
+.pt-active-edge + text, .pt-active-edge text { fill: #a6e3a1 !important; }
+
+/* Phase C : coloration des modules par rôle (survol = description dans la
+   sidebar + tooltip natif). Palette Catppuccin Mocha. */
+.pt-phase-seq   :is(polygon, ellipse, rect) { fill: rgba(137,180,250,0.22) !important; stroke: #89b4fa !important; }
+.pt-phase-seq   text { fill: #cdd6f4 !important; }
+.pt-phase-io    :is(polygon, ellipse, rect) { fill: rgba(108,112,134,0.25) !important; stroke: #6c7086 !important; }
+.pt-phase-mem   :is(polygon, ellipse, rect) { fill: rgba(203,166,247,0.22) !important; stroke: #cba6f7 !important; }
+.pt-phase-norm  :is(polygon, ellipse, rect) { fill: rgba(249,226,175,0.22) !important; stroke: #f9e2af !important; }
+.pt-phase-attn  :is(polygon, ellipse, rect) { fill: rgba(243,139,168,0.22) !important; stroke: #f38ba8 !important; }
+.pt-phase-act   :is(polygon, ellipse, rect) { fill: rgba(250,179,135,0.25) !important; stroke: #fab387 !important; }
+.pt-phase-mac   :is(polygon, ellipse, rect) { fill: rgba(166,227,161,0.22) !important; stroke: #a6e3a1 !important; }
+.pt-phase-clk   :is(polygon, ellipse, rect) { fill: rgba(148,226,213,0.22) !important; stroke: #94e2d5 !important; }
+.pt-phase-boot  :is(polygon, ellipse, rect) { fill: rgba(220,138,120,0.22) !important; stroke: #dc8a78 !important; }
+/* conteneurs (u_n, top) : neutre, pas de fill teinté */
+.pt-phase-node  :is(polygon, ellipse, rect), .pt-phase-top :is(polygon, ellipse, rect) {
+  fill: rgba(205,214,244,0.06) !important; stroke: #585b70 !important; stroke-dasharray: 4 3 !important;
+}
+
+/* description du module survolé (sidebar) */
+.pt-mod-desc { margin-top: 6px; padding-top: 6px; border-top: 1px solid #45475a;
+  color: var(--fg); font-size: 11px; line-height: 1.4; }
+
+/* légende overlay dans la zone graphe */
+.pt-graph { position: relative; }
+.pt-legend { position: absolute; top: 8px; right: 8px; max-width: 260px;
+  background: rgba(30,30,46,0.92); border: 1px solid #45475a; border-radius: 6px;
+  padding: 8px 10px; font-size: 11px; pointer-events: none; }
+.pt-leg-title { color: var(--accent); font-weight: 600; margin-bottom: 4px; }
+.pt-leg-items { display: flex; flex-wrap: wrap; gap: 3px 10px; margin-bottom: 6px; }
+.pt-leg-item { display: inline-flex; align-items: center; gap: 4px; color: var(--fg); }
+.pt-leg-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px;
+  border: 1px solid; background: rgba(255,255,255,0.05); }
+.pt-leg-swatch.pt-phase-seq  { border-color: #89b4fa; background: rgba(137,180,250,0.25); }
+.pt-leg-swatch.pt-phase-io   { border-color: #6c7086; background: rgba(108,112,134,0.25); }
+.pt-leg-swatch.pt-phase-mem  { border-color: #cba6f7; background: rgba(203,166,247,0.25); }
+.pt-leg-swatch.pt-phase-norm { border-color: #f9e2af; background: rgba(249,226,175,0.25); }
+.pt-leg-swatch.pt-phase-attn { border-color: #f38ba8; background: rgba(243,139,168,0.25); }
+.pt-leg-swatch.pt-phase-act  { border-color: #fab387; background: rgba(250,179,135,0.25); }
+.pt-leg-swatch.pt-phase-mac  { border-color: #a6e3a1; background: rgba(166,227,161,0.25); }
+.pt-leg-swatch.pt-phase-clk  { border-color: #94e2d5; background: rgba(148,226,213,0.25); }
+.pt-leg-swatch.pt-phase-boot { border-color: #dc8a78; background: rgba(220,138,120,0.25); }
+.pt-leg-flow { color: var(--muted); line-height: 1.45; border-top: 1px solid #45475a; padding-top: 5px; }
+.pt-leg-flow b { color: var(--hl); }
+
 /* onglets vues */
 .pt-tabs { display: flex; gap: 2px; background: #11111b; height: 36px;
   padding: 4px 8px 0; border-bottom: 1px solid #45475a; }

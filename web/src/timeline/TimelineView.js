@@ -56,6 +56,9 @@ export class TimelineView {
     this.selected = new Set();
     this.iCycle = 0;
     this.playing = false;
+    // Phase C : callbacks vers l'état partagé (AnimateView sync).
+    this.onCycleChange = null;     // (iCycle, cycles) => void
+    this.onTimelineLoaded = null;  // (tl) => void
     this._bind();
     this._loadTbs();
   }
@@ -75,7 +78,7 @@ export class TimelineView {
     this.playBtn.onclick = () => this._togglePlay();
     this.stepfBtn.onclick = () => this._step(1);
     this.stepbBtn.onclick = () => this._step(-1);
-    this.seek.oninput = () => { this.iCycle = +this.seek.value; this._render(); };
+    this.seek.oninput = () => { this.iCycle = +this.seek.value; this._render(); this._emitCycle(); };
     this.speedInp.onchange = () => { if (this.playing) this._startTick(); };
   }
 
@@ -143,6 +146,7 @@ export class TimelineView {
     this.seek.max = Math.max(0, this.cycles.length - 1);
     this.seek.value = this.iCycle;
     this._render();
+    if (this.onTimelineLoaded) this.onTimelineLoaded(this.tl);
   }
 
   _togglePlay() {
@@ -160,6 +164,7 @@ export class TimelineView {
       if (this.iCycle >= this.cycles.length) { this.iCycle = this.cycles.length - 1; this._togglePlay(); return; }
       this.seek.value = this.iCycle;
       this._render();
+      this._emitCycle();
     }, 1000 / cps);
   }
 
@@ -171,6 +176,12 @@ export class TimelineView {
     this.iCycle = Math.max(0, Math.min(this.cycles.length - 1, this.iCycle + d));
     this.seek.value = this.iCycle;
     this._render();
+    this._emitCycle();
+  }
+
+  // Phase C : notifie l'état partagé du cycle courant (sync AnimateView).
+  _emitCycle() {
+    if (this.onCycleChange) this.onCycleChange(this.iCycle, this.cycles);
   }
 
   _tAt() {

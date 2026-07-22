@@ -19,6 +19,19 @@ export async function getGraphSvg(top) {
   return r.text();
 }
 
+// --- Dataflow d'un token (vue pipeline) ---
+export async function getPipeline() {
+  const r = await fetch(`${BASE}/pipeline`);
+  if (!r.ok) throw new Error(`pipeline: ${r.status}`);
+  return r.json();
+}
+
+export async function getPipelineSvg() {
+  const r = await fetch(`${BASE}/pipeline_svg`);
+  if (!r.ok) throw new Error(`pipeline_svg: ${r.status}`);
+  return r.text();
+}
+
 // --- Phase B : simulation / VCD ---
 
 export async function listTbs() {

@@ -391,6 +391,80 @@ def cluster_of(parent_inst: str, child_inst: str) -> Tuple[str, ...]:
     return INSTANCE_CLUSTERS.get((parent_inst, child_inst), ())
 
 
+# Phase C : méta-données pédagogiques (phase fonctionnelle + description) par
+# nom d'instance. Phase = catégorie pour couleur/légende du graphe.
+MODULE_META: Dict[str, Tuple[str, str]] = {
+    "u_seq": ("seq", "Séquenceur (FSM). Pilote le pipeline phase par phase : "
+                       "embed → rmsnorm → QKV → RoPE → attention → FFN → lm_head. "
+                       "Envoie des opcodes au node via u_cmd, reçoit les vecteurs "
+                       "via u_resp. Gère la boucle de tokens et fait l'argmax final."),
+    "u_alu": ("seq", "ALU du séquenceur (vec_alu2). Additionneur sérialisé : "
+                      "résiduels (XB += OUTV/W2) et réductions (W2)."),
+    "u_mac": ("seq", "Multiplieur mac18 interne à u_alu (distinct de u_fm_mac)."),
+    "u_cmd": ("io", "FIFO de commandes u_seq → u_n (octets d'opcode + données)."),
+    "u_resp": ("io", "FIFO de réponses u_n → u_seq (vecteurs résultats)."),
+    "u_tx": ("io", "Émetteur ss_link (sérialiseur d'octets du lien interne)."),
+    "u_rx": ("io", "Récepteur ss_link (désérialiseur d'octets du lien interne)."),
+    "u_sdram": ("mem", "Contrôleur SDRAM externe. Lit les poids du modèle "
+                       "(rms/wq/wk/wv/wo/w1/w3/w2/tok_emb) et héberge le KV cache "
+                       "(kvmem : K,V des tokens passés)."),
+    "u_wc": ("mem", "Cache FFN (wcache_ffn, BRAM 184 Ko). Cache W1/W3/W2 du FFN. "
+                    "Inactif en sim (path non-FLASH_BOOT), actif sur silicium."),
+    "u_rms": ("norm", "RMSNorm (rmsnorm_op). Normalise avant l'attention, avant "
+                      "le FFN, et en final avant lm_head. Réutilisé 3 rôles."),
+    "u_rope": ("attn", "RoPE (rope_op). Rotation positionnelle des vecteurs Q et K "
+                        "selon la position (freq_cis en BSRAM)."),
+    "u_attn": ("attn", "Cœur d'attention (attention_head_op). Matmul Q·K puis "
+                       "pondération des V : softmax(scores) × V → ATT."),
+    "u_soft": ("attn", "Softmax (softmax_op) des scores d'attention, par tête."),
+    "u_silu": ("act", "Activation SiLu (silu_op) du FFN : x·sigmoid(x), entre W1 et W2."),
+    "u_fm_mac": ("mac", "Unité de matmul (mac18 pipeliné, FQ). Fait TOUTES les "
+                        "projections : WQ/WK/WV/WO (attention), W1/W3/W2 (FFN), "
+                        "lm_head. C'est l'unité de calcul partagée du node."),
+    "u_pll": ("clk", "PLL d'horloge (ECP5_PLL). Génère clk_sys depuis l'horloge "
+                     "board (pas de calcul NN)."),
+    "u_boot": ("boot", "Boot flash (flash_boot). DMA SPI flash → SDRAM au démarrage "
+                       "+ latch des shifts. Absent en sim (ifdef FLASH_BOOT)."),
+    "u_n": ("node", "Node (node_top) : le transformer complet. Contient rms, rope, "
+                    "attn, softmax, silu, mac, sdram, cache. Exécute les calculs NN "
+                    "demandés par u_seq."),
+    "gen_seq_top": ("top", "Top SIMULATION (wrapper). Ports propres pilotés par un "
+                           "testbench. Build -DLINK_SS (+ -DSDRAM_PRELOAD en sim). "
+                           "Instancié par tb_node.v (Packet Tracer)."),
+    "gen_seq_silicon": ("top", "Top SILICIUM (wrapper Colorlight i9). UART host "
+                               "(LL/SH/GO/PR/RR), boot flash, pins physiques. "
+                               "Build -DFLASH_BOOT -DCLUSTER_NODE. Flashé sur le FPGA."),
+}
+
+
+def module_meta(inst: str, module: str) -> Tuple[str, str]:
+    if inst in MODULE_META:
+        return MODULE_META[inst]
+    if module in MODULE_META:
+        return MODULE_META[module]
+    return ("", "")
+
+
+# Communications logiques entre modules frères (ABSENTES de l'arbre
+# d'instanciation, qui ne montre que la contenance parent→child). Ces arêtes
+# superposent les liens runtime réels sur le graphe hiérarchie, pour répondre au
+# "tous les modules n'ont que des entrées, aucun ne communique".
+# (from_inst, to_inst, label, kind) ; kind ∈ cmd|resp|link|boot.
+# - cmd/resp : FIFO parallèle (path CLUSTER_NODE / multi-puce).
+# - link     : ss_link série (path LINK_SS / sim gen_seq_top).
+# - boot     : latch shifts + DMA flash→SDRAM (silicium, ifdef FLASH_BOOT).
+COMM_EDGES: List[Tuple[str, str, str, str]] = [
+    ("u_seq", "u_cmd", "cmd (push opcode)", "cmd"),
+    ("u_cmd", "u_n", "cmd (pop opcode)", "cmd"),
+    ("u_n", "u_resp", "resp (push)", "resp"),
+    ("u_resp", "u_seq", "resp (pop)", "resp"),
+    ("u_seq", "u_n", "ss_link (opcode)", "link"),
+    ("u_n", "u_seq", "ss_link (resp)", "link"),
+    ("u_boot", "u_sdram", "DMA flash→poids", "boot"),
+    ("u_boot", "u_seq", "latch shifts", "boot"),
+]
+
+
 def build_graph_dict(top: str, g: RTLGraph, max_depth: int = 3) -> dict:
     """Construit le dict JSON servi par /api/graph/{top}."""
     root = build_inst_tree(top, g, max_depth=max_depth)
@@ -406,6 +480,8 @@ def build_graph_dict(top: str, g: RTLGraph, max_depth: int = 3) -> dict:
             "cluster": cluster_of(n.parent, n.inst) if n.parent else (),
             "buses": n.buses,
             "id": css_id("mod", n.hier),
+            "phase": module_meta(n.inst, n.module)[0],
+            "desc": module_meta(n.inst, n.module)[1],
         }
         for n in nodes
     }
@@ -418,11 +494,30 @@ def build_graph_dict(top: str, g: RTLGraph, max_depth: int = 3) -> dict:
             "buses": buses,
             "id": eid,
         })
+    # Index inst -> hier (premier module portant cet inst name) pour résoudre
+    # les COMM_EDGES en arêtes concrètes sur ce top.
+    inst_to_hier: Dict[str, str] = {}
+    for h, m in modules_meta.items():
+        inst_to_hier.setdefault(m["inst"], h)
+    comm_edgelist = []
+    for from_inst, to_inst, label, kind in COMM_EDGES:
+        fh = inst_to_hier.get(from_inst)
+        th = inst_to_hier.get(to_inst)
+        if not fh or not th:
+            continue  # module absent de ce top (ex. u_boot en sim)
+        comm_edgelist.append({
+            "from": fh,
+            "to": th,
+            "label": label,
+            "kind": kind,
+            "id": css_id("comm", f"{fh}__{th}"),
+        })
     return {
         "top": top,
         "modules": modules_meta,
         "nodes": [{"hier": n.hier, "inst": n.inst, "module": n.module, "depth": n.depth} for n in nodes],
         "edges": edgelist,
+        "comm_edges": comm_edgelist,
         "clusters": sorted({c for n in nodes for c in cluster_of(n.parent, n.inst) if n.parent}),
     }
 
