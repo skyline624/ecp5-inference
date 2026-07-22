@@ -21,6 +21,8 @@ const PHASE_LABEL = {
   seq: 'Séquenceur',
 };
 
+const TIER_NAME = { flash: 'Flash', sdram: 'SDRAM', bram: 'BRAM' };
+
 export class PipelineView {
   constructor(root) {
     root.innerHTML = `
@@ -33,6 +35,7 @@ export class PipelineView {
           <div id="pp-graph" class="pt-graph"></div>
           <div class="pt-sidebar" id="pp-sidebar">
             <div class="pt-side-sec"><b>Étape</b><div id="pp-step-info">— (survolez une étape)</div></div>
+            <div class="pt-side-sec"><b>Mémoires accédées</b><div id="pp-mem-info">—</div></div>
             <div class="pt-side-sec"><b>Vecteur survolé</b><div id="pp-vec-info">—</div></div>
             <div class="pt-side-sec"><b>Lecture</b>
               <div class="pt-mod-desc">
@@ -51,6 +54,7 @@ export class PipelineView {
     this.graphEl = root.querySelector('#pp-graph');
     this.sideEl = root.querySelector('#pp-sidebar');
     this.stepInfo = root.querySelector('#pp-step-info');
+    this.memInfo = root.querySelector('#pp-mem-info');
     this.vecInfo = root.querySelector('#pp-vec-info');
     this.load();
   }
@@ -94,6 +98,7 @@ export class PipelineView {
     this.stepInfo.innerHTML =
       `<code>${step.label.replace(/\n/g, ' ')}</code>` +
       `<div class="pt-mod-desc"><b>Phase :</b> ${PHASE_LABEL[step.phase] || step.phase}<br>${step.desc}</div>`;
+    this._renderMem(step);
     // surligne les arêtes incidentes
     this.graphEl.querySelectorAll('[id^="vec:"]').forEach((e) => e.classList.remove('pt-edge-hl'));
     for (const v of this.data.vecs) {
@@ -112,9 +117,27 @@ export class PipelineView {
       `<b>${v.from}</b> → <b>${v.to}</b></div>`;
   }
 
+  // Liste les accès mémoire de l'étape (chips tier + région + op R/W).
+  _renderMem(step) {
+    const mem = step.mem || [];
+    if (!mem.length) {
+      this.memInfo.innerHTML = '<span class="pt-muted">— (aucune accès mémoire)</span>';
+      return;
+    }
+    const regions = this.data.mem_regions || {};
+    const rows = mem.map((a) => {
+      const reg = regions[a.region] || { label: a.region, tier: '?' };
+      const op = a.op === 'write' ? 'W' : 'R';
+      const name = TIER_NAME[reg.tier] || reg.tier;
+      return `<div style="margin-bottom:3px"><span class="pt-mem-chip" data-tier="${reg.tier}">${name} · ${op}</span>` +
+        `<code>${reg.label}</code></div>`;
+    });
+    this.memInfo.innerHTML = `<div class="pt-mod-desc">${rows.join('')}</div>`;
+  }
+
   _unhighlight() { /* garde le dernier highlight au click */ }
 
-  // Légende overlay des phases + ordre du flux (rappel textuel).
+  // Légende overlay des phases + tiers mémoire + ordre du flux (rappel textuel).
   _renderLegend() {
     const phases = [
       ['io', 'Prompt / IO'], ['mem', 'Mémoire'], ['norm', 'RMSNorm'],
@@ -122,10 +145,17 @@ export class PipelineView {
     ];
     const items = phases.map(([k, lbl]) =>
       `<span class="pt-leg-item"><span class="pt-leg-swatch pt-phase-${k}"></span>${lbl}</span>`).join('');
+    const tiers = [
+      ['flash', 'Flash (poids)'], ['sdram', 'SDRAM (KV + poids)'], ['bram', 'BRAM (calculs)'],
+    ];
+    const tierItems = tiers.map(([k, lbl]) =>
+      `<span class="pt-leg-item"><span class="pt-leg-swatch pt-phase-${k}"></span>${lbl}</span>`).join('');
     const flow = 'Flux : <b>embed</b> → rms → <b>QKV</b> → rope → kv-write → <b>attn</b> → WO → résiduel → rms → <b>FFN</b> → résiduel <i>(×5 couches)</i> → rms → <b>lm_head</b> → <b>argmax</b> → token (boucle)';
     const html = `<div class="pt-legend">
       <div class="pt-leg-title">Étapes par phase</div>
       <div class="pt-leg-items">${items}</div>
+      <div class="pt-leg-title" style="margin-top:4px">Mémoires (pastilles sur les nœuds)</div>
+      <div class="pt-leg-items">${tierItems}</div>
       <div class="pt-leg-flow">${flow}</div>
     </div>`;
     this.graphEl.querySelectorAll('.pt-legend').forEach((e) => e.remove());

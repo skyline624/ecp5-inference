@@ -118,3 +118,33 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
 .tl-sig { display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; }
 .tl-val { font-size: 11px; margin-bottom: 3px; }
 .tl-val code { background: var(--panel-2); padding: 1px 5px; border-radius: 3px; }
+
+/* Mémoires intégrées au dataflow : bande mémoire (AnimateView) + chips sidebar
+   (PipelineView/AnimateView). Tiers = flash brick / SDRAM mauve / BRAM teal,
+   cohérent avec .pt-phase-flash/sdram/bram et la vue « Mémoires ». */
+.pt-memband { display: flex; gap: 10px; background: var(--panel);
+  border-bottom: 1px solid #45475a; padding: 6px 14px; font-size: 11px; }
+.pt-mem-col { flex: 1; display: flex; flex-direction: column; gap: 4px;
+  border-top: 3px solid; padding-top: 4px; min-width: 0; }
+.pt-mem-col[data-tier="flash"] { border-top-color: #dc8a78; }
+.pt-mem-col[data-tier="sdram"] { border-top-color: #cba6f7; }
+.pt-mem-col[data-tier="bram"]  { border-top-color: #94e2d5; }
+.pt-mem-col-title { color: var(--muted); font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.5px; }
+.pt-mem-cells { display: flex; flex-wrap: wrap; gap: 4px; }
+.pt-mem-cell { padding: 3px 7px; border: 1px solid #45475a; border-radius: 3px;
+  color: var(--muted); background: rgba(255,255,255,0.03); transition: all 0.12s;
+  white-space: nowrap; }
+.pt-mem-cell.pt-mem-active { color: var(--fg); font-weight: 600; }
+.pt-mem-cell[data-tier="flash"].pt-mem-active { border-color: #dc8a78; background: rgba(220,138,120,0.28); }
+.pt-mem-cell[data-tier="sdram"].pt-mem-active { border-color: #cba6f7; background: rgba(203,166,247,0.28); }
+.pt-mem-cell[data-tier="bram"].pt-mem-active  { border-color: #94e2d5; background: rgba(148,226,213,0.28); }
+/* write = halo rose plus fort pour distinguer d'un read */
+.pt-mem-cell.pt-mem-active.pt-mem-write { border-width: 2px; border-color: #f38ba8;
+  box-shadow: 0 0 6px rgba(243,139,168,0.55); }
+/* chip sidebar (tier + op) réutilisable PipelineView + AnimateView */
+.pt-mem-chip { display: inline-block; padding: 1px 6px; border-radius: 3px;
+  color: #1e1e2e; font-size: 10px; font-weight: 600; margin-right: 4px; }
+.pt-mem-chip[data-tier="flash"] { background: #dc8a78; }
+.pt-mem-chip[data-tier="sdram"] { background: #cba6f7; }
+.pt-mem-chip[data-tier="bram"]  { background: #94e2d5; }

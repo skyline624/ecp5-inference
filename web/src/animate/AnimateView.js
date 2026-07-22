@@ -21,6 +21,9 @@ const TB_PREFIX = 'tb_node.u_dut.';
 const SIG_ST = `${TB_PREFIX}u_seq.st`;
 const SIG_PHASE = `${TB_PREFIX}u_seq.phase`;
 
+const TIER_NAME = { flash: 'Flash', sdram: 'SDRAM', bram: 'BRAM' };
+const TIER_ORDER = ['flash', 'sdram', 'bram'];
+
 // FSM gen_seq.v : phase[3:0] + st[4:0] -> étape pipeline (mode VCD réel).
 const PHASE_STEP = {
   13: 'embed', 0: 'rms_att', 1: 'qkv', 2: 'qkv', 3: 'qkv', 4: 'attn',
@@ -63,6 +66,9 @@ const ONE_TOKEN = [
 function buildDemo() {
   const stepAt = [];
   const tokAt = [];
+  // Boot (power-up, 1×) : flash -> SDRAM, avant le 1er token. tok = -1.
+  const BOOT_TICKS = 30;
+  for (let k = 0; k < BOOT_TICKS; k++) { stepAt.push('boot'); tokAt.push(-1); }
   for (let t = 0; t < NTOKENS; t++) {
     for (const [step, ticks] of ONE_TOKEN) {
       for (let k = 0; k < ticks; k++) { stepAt.push(step); tokAt.push(t); }
@@ -73,7 +79,7 @@ function buildDemo() {
   let layer = -1;
   for (let i = 0; i < stepAt.length; i++) {
     const s = stepAt[i];
-    if (s === 'prompt' || s === 'embed') layer = -1;
+    if (s === 'boot' || s === 'prompt' || s === 'embed') layer = -1;
     else if (s === 'rms_att') layer = (layer + 1) % NLAYERS;
     layAt[i] = layer;
   }
@@ -99,10 +105,12 @@ export class AnimateView {
           <input id="an-seek" type="range" min="0" max="0" value="0" style="flex:1;min-width:160px">
           <span id="an-cyc" class="pt-muted">0 / 0</span>
         </div>
+        <div id="an-memband" class="pt-memband"></div>
         <div class="pt-main">
           <div id="an-graph" class="pt-graph"></div>
           <div class="pt-sidebar" id="an-sidebar">
             <div class="pt-side-sec"><b>Étape courante</b><div id="an-now">—</div></div>
+            <div class="pt-side-sec"><b>Mémoires actives</b><div id="an-mem">—</div></div>
             <div class="pt-side-sec"><b>Position</b><div id="an-pos">—</div></div>
             <div class="pt-side-sec"><b>Vecteurs en transit</b><div id="an-vec">—</div></div>
             <div class="pt-side-sec"><b>Légende</b>
@@ -127,7 +135,9 @@ export class AnimateView {
     this.seek = root.querySelector('#an-seek');
     this.cycEl = root.querySelector('#an-cyc');
     this.graphHost = root.querySelector('#an-graph');
+    this.memBand = root.querySelector('#an-memband');
     this.nowEl = root.querySelector('#an-now');
+    this.memEl = root.querySelector('#an-mem');
     this.posEl = root.querySelector('#an-pos');
     this.vecEl = root.querySelector('#an-vec');
 
@@ -145,6 +155,7 @@ export class AnimateView {
   async _loadPipeline() {
     const [svg, data] = await Promise.all([getPipelineSvg(), getPipeline()]);
     this.data = data;
+    this._buildMemBand();
     this.graphHost.innerHTML = svg;
     const svgEl = this.graphHost.querySelector('svg');
     if (!svgEl) return;
@@ -156,6 +167,50 @@ export class AnimateView {
     });
     // la démo est jouable dès que le SVG est là.
     this._startDemo();
+  }
+
+  // Construit la bande mémoire : 3 colonnes (flash/SDRAM/BRAM) avec les régions
+  // en cellules. Statique — seules les classes d'activité bougent par cycle.
+  _buildMemBand() {
+    const regions = this.data.mem_regions || {};
+    const byTier = {};
+    for (const id in regions) {
+      const r = regions[id];
+      (byTier[r.tier] = byTier[r.tier] || []).push(id);
+    }
+    const cols = TIER_ORDER.map((tier) => {
+      const cells = (byTier[tier] || []).map((id) =>
+        `<div class="pt-mem-cell" id="anmem-${id}" data-tier="${tier}">${id}</div>`).join('');
+      return `<div class="pt-mem-col" data-tier="${tier}">` +
+        `<div class="pt-mem-col-title">${TIER_NAME[tier]}</div>` +
+        `<div class="pt-mem-cells">${cells}</div></div>`;
+    }).join('');
+    this.memBand.innerHTML = cols;
+  }
+
+  // Allume les cellules mémoire de l'étape courante + remplit la sidebar.
+  _renderMem(stepId) {
+    const step = this.data.steps[stepId] || {};
+    const mem = step.mem || [];
+    const regions = this.data.mem_regions || {};
+    if (!mem.length) {
+      this.memEl.innerHTML = '<span class="pt-muted">— (aucune accès mémoire)</span>';
+      return;
+    }
+    for (const a of mem) {
+      const cell = this.memBand.querySelector(`#anmem-${cssEscape(a.region)}`);
+      if (cell) {
+        cell.classList.add('pt-mem-active');
+        cell.classList.add(a.op === 'write' ? 'pt-mem-write' : 'pt-mem-read');
+      }
+    }
+    const chips = mem.map((a) => {
+      const reg = regions[a.region] || { tier: '?' };
+      const op = a.op === 'write' ? 'W' : 'R';
+      const name = TIER_NAME[reg.tier] || reg.tier;
+      return `<div style="margin-bottom:3px"><span class="pt-mem-chip" data-tier="${reg.tier}">${name} · ${op}</span><code>${a.region}</code></div>`;
+    });
+    this.memEl.innerHTML = `<div class="pt-mod-desc">${chips.join('')}</div>`;
   }
 
   _startDemo() {
@@ -286,13 +341,17 @@ export class AnimateView {
     if (!this.panZoom || !this.data) return;
     this.graphHost.querySelectorAll('[id^="step:"]').forEach((n) => n.classList.remove('pt-active'));
     this.graphHost.querySelectorAll('[id^="vec:"]').forEach((e) => e.classList.remove('pt-active-edge'));
+    this.memBand.querySelectorAll('.pt-mem-cell').forEach((c) =>
+      c.classList.remove('pt-mem-active', 'pt-mem-read', 'pt-mem-write'));
     const stepId = this.stepAtCycle[this.iCycle];
     if (!stepId) {
       this.nowEl.innerHTML = '<span class="pt-muted">— (IDLE / non démarré)</span>';
+      this.memEl.innerHTML = '<span class="pt-muted">—</span>';
       this.posEl.innerHTML = '—';
       this.vecEl.innerHTML = '—';
       return;
     }
+    this._renderMem(stepId);
     const node = this.graphHost.querySelector(`#${cssEscape('step:' + stepId)}`);
     if (node) node.classList.add('pt-active');
     const incs = this.data.vecs.filter((v) => v.from === stepId || v.to === stepId);
@@ -308,7 +367,9 @@ export class AnimateView {
     const lay = this.layAtCycle[this.iCycle];
     this.posEl.innerHTML = tok >= 0
       ? `token <b>${tok + 1}/${NTOKENS}</b>` + (lay >= 0 ? ` · couche <b>${lay + 1}/${NLAYERS}</b>` : '')
-      : '<span class="pt-muted">— (VCD réel)</span>';
+      : (this.mode === 'demo'
+        ? '<span class="pt-muted">boot (power-up, 1×)</span>'
+        : '<span class="pt-muted">— (VCD réel)</span>');
     this.vecEl.innerHTML = incs.length
       ? incs.map((v) => `<code>${v.label}</code> <span class="pt-muted">(${v.from}→${v.to})</span>`).join('<br>')
       : '—';
