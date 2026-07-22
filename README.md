@@ -29,6 +29,12 @@ Héritage du portage :
   `dsp_inference/host/` (sinon les `.hex` n'étaient plus régénérables) ;
   `gen_freq_cis_lut.py` reprend la formule `make_freq_cis` de l'original
   (aucun script générateur RoPE n'existait auparavant). Voir `lut/README.md`.
+- **Modèle & tokenizer** (`host/models/stories260K.bin`, `tok512.bin`) bundlés
+  dans le dépôt pour l'auto-suffisance. `stories260K.bin` est un dérivé du modèle
+  [Karpathy tinyllamas/stories260K](https://huggingface.co/karpathy/tinyllamas)
+  (MIT), réduit à un vocabulaire de 512 tokens et au format `llama2.c` (header
+  7×int32 + poids float32) par l'auteur du projet Gowin source. Le port ne dépend
+  plus d'aucun dépôt sibling à l'exécution.
 
 Plan complet : `docs/PLAN_ECP5_BRINGUP.md` (cluster), `docs/PLAN_GEN_SEQUENCER.md`
 (séquenceur mono-carte), `docs/REFACTOR_UNIFIED_NODE.md` (garde-fous G1-G7).
@@ -52,8 +58,26 @@ Verdict : valider sur un cluster de FPGA ECP5. Ce dossier porte cette lignée
 | 3 | Port du nœud (matmul bit-exact) — DSP mac18 | ✅ matmul W@x (int8×int8→int32, 8 lignes) bit-exact vs réf Python sur i9 — mac18 RTL → MULT18X18D (sim + silicium) |
 | 4 | Lien 2-cartes PMOD (ss_link, skew = inconnue n°1) | à faire (pinout PMOD à assigner — `Colorlight-FPGA-Projects/src/amaranth_boards/colorlight_i9_r7_2.py` lignes 85-89, pmod 2/3 sur P3 recommandés, éviter pmod 0 = L2/LED) |
 | 5 | Tensor-parallel NN=2 | à faire (sim vert NN=2 et NN=4 ; silicium non testé) |
-| 6 | Génération zéro-PC (boot flash SPI) | boot flash SPI à faire |
-| 6' | Génération autonome mono-carte (UART-loading) | ✅ `board/gen_seq_silicon.v` — le PC charge les poids int8 via UART (`LL`/`SH`/`GO`), la FPGA génère 17 tokens sans commande PC pendant l'inférence. Bitstream bâti, route sur ECP5-45. **Autonomie d'inférence atteinte** ; reste l'autonomie de *boot* (flash SPI, Gate 6). |
+| 6 | Génération zéro-PC (boot flash SPI) | ✅ boot flash W25Q64→SDRAM validé silicium (modèle auto-chargé au power-up, USRMCLK pour SCK, block protection off, RR préalable) — voir `docs/FLASH_BOOT.md` |
+| 6' | Génération autonome mono-carte (UART-loading) | ✅ `board/gen_seq_silicon.v` — **9 tokens bit-exact** `[403,407,261,378,432,383,286,261,376]` sur silicium (divergence @9 acceptée, softmax simplifié). Boot flash + prefill (prompt→génération) + KV-cache SDRAM validés. |
+
+### Validation silicium étendue (mono-carte, branche `prove-gen-node`)
+
+Au-delà du bring-up, la gate 6' a été durcie et optimisée sur silicium
+(inférence bit-exact préservée à chaque étape, 9 tokens vs oracle float) :
+
+| Étape | Changement | Effet silicium |
+|---|---|---|
+| Boot flash | `flash_boot.v` autonomous W25Q64→SDRAM + USRMCLK | modèle auto-chargé, 9 bit-exact |
+| Prefill | opcode `PR` + mode prefill `gen_seq`, BOS préfixé côté host | prompt→génération validé |
+| Perf 1 — PLL | bump 25→31.25 MHz (define `CLUSTER_NODE`, CDC `async_fifo`) | decode 6.8→8.53 tok/s (×1.25) |
+| Perf 2a — dot | FQ pipeliné mac18 (256→68 cyc/ligne) | decode 8.53→10.96 tok/s (×1.61 cumulé) |
+| Perf 3 — wcache | cache FFN BRAM 184 KiB (90 DP16KD) | decode 10.96→14.02 tok/s (×2.06 cumulé) |
+| KV-cache SDRAM | kmem/vmem BRAM→SDRAM externe (libère 6 DP16KD, `kv_cdc` toggle-sync CDC clk↔clk_sys) | 9 bit-exact préservé, TMAX>>32 possible |
+
+Build silicium : `.\build\build_silicon.ps1` (`-D NODE_ONLY,FLASH_BOOT,CLUSTER_NODE`),
+DP16KD 91 %, timing PASS (clk 30.6 / clk_sys 35.5 MHz). Flash :
+`openFPGALoader -b colorlight-i9 --skip-reset build\gen_seq_silicon.bit`.
 
 > **Note** : la Gate 6' (`gen_seq_silicon.v`) est une dérivation parallèle au
 > chemin cluster — la même FSM `gen_seq` (NN=1 figé) orchestrée par un wrapper
@@ -169,8 +193,16 @@ RTL ; G3 isoler chaque brique (2-4 bugs/brique) ; G4 non-régression NN=1 et NN=
 G5 construire sur la lignée qui route ; G6 commit sur vert seulement ; G7 un
 seul code NN-paramétré (NN=1 mono = NN=N cluster).
 
-## Rescaffold
+## Rescaffold (artefact d'extraction historique)
+
+`scaffold.ps1` documente **comment le port a été extrait** à l'origine depuis
+l'arbre Gowin `dsp_inference` (recopie des opérateurs portés + de la branche
+cluster dans un sous-répertoire `ecp5/`). **Il n'est pas nécessaire pour utiliser
+ce dépôt indépendant** — `src/`, `board/`, `lut/`, `host/models/` et `scripts/`
+sont déjà en place et auto-suffisants. Conservé pour la traçabilité de la
+provenance uniquement.
 
 ```powershell
+# (Historique — uniquement pertinent depuis l'arbre dsp_inference d'origine)
 cd ecp5\build ; .\scaffold.ps1    # recopie depuis master src/ + branche cluster
 ```

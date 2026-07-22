@@ -4,6 +4,10 @@
 # synth.ys et sim/Makefile sont des sources et ne matchent pas ces patterns.
 *.bit
 *.bin
+# Exception : le modèle stories260K (dérivé 512-vocab) et le tokenizer sont des
+# données source bundlées pour l'auto-suffisance du dépôt (non régénérables
+# in-tree). model_flash.bin reste ignoré (image flash regénérable par gen_flash_model).
+!host/models/*.bin
 *.config
 *.rpt
 *.log

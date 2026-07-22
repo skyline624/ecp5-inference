@@ -21,8 +21,9 @@ import sys
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# stories260K.bin vit dans le dépôt sibling dsp_coproc (cf. host/infer_fpga.py).
-MODEL = os.path.join(HERE, "..", "..", "dsp_coproc", "host", "models", "stories260K.bin")
+# stories260K.bin (dérivé 512-vocab) est bundlé dans le dépôt (host/models/).
+# Provenance : dérivé de Karpathy tinyllamas/stories260K (MIT), voir README.
+MODEL = os.path.join(HERE, "models", "stories260K.bin")
 
 
 def load_model(path):

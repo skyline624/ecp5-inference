@@ -20,8 +20,12 @@ from v4_quant import to_i8_shift, from_i8_shift
 
 PORT = "COM6"; BAUD = 1_000_000
 HERE = os.path.dirname(os.path.abspath(__file__))
-MODEL = os.path.join(HERE, "..", "..", "dsp_coproc", "host", "models", "stories260K.bin")
-TOK   = os.path.join(HERE, "..", "..", "dsp_coproc", "host", "models", "tok512.bin")
+# Modèle stories260K (dérivé 512-vocab, format llama2.c) — bundlé dans le dépôt
+# (host/models/) pour l'auto-suffisance. Provenance : dérivé de Karpathy
+# tinyllamas/stories260K (MIT), réduit à un vocab de 512 tokens par l'auteur du
+# projet Gowin source (dsp_inference). Voir README § Provenance.
+MODEL = os.path.join(HERE, "models", "stories260K.bin")
+TOK   = os.path.join(HERE, "models", "tok512.bin")
 
 # ─── Loader ──────────────────────────────────────────────────────────────
 def load_model(path):
