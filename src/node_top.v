@@ -521,8 +521,8 @@ module top #(
     reg signed [7:0] gg_sh_q_out;       // shift de Q after matmul (saved)
     reg signed [7:0] gg_sh_k_out;       // shift de K after matmul
     reg signed [7:0] gg_sh_v_out;       // shift de V after matmul
-    reg [255:0]      gg_k_packed;       // K[32] storage (32 bytes packed)
-    reg [255:0]      gg_v_packed;       // V[32] storage
+    reg [CFG_KVW*8-1:0]      gg_k_packed;       // K[KVW] storage (KVW bytes packed)
+    reg [CFG_KVW*8-1:0]      gg_v_packed;       // V[KVW] storage
     reg [511:0]      x_save_packed;     // x_orig pour le residual (64 bytes)
     reg signed [7:0] gg_x_shift;        // shift courant du x sauve (pour residual)
     reg signed [7:0] gg_sh_o;           // shift de Wo (recu de PC)
@@ -609,16 +609,16 @@ module top #(
         gg_mult_add_shift = (gg_mult_lead_bit > 6'd6) ? (gg_mult_lead_bit - 6'd6) : 6'd0;
     end
 
-    // ---- Cos/sin storage (pour RoPE) ----
-    reg signed [15:0] cos_reg [0:3];
-    reg signed [15:0] sin_reg [0:3];
+    // ---- Cos/sin storage (pour RoPE) : HALF = HS/2 entries ----
+    reg signed [15:0] cos_reg [0:CFG_HALF-1];
+    reg signed [15:0] sin_reg [0:CFG_HALF-1];
 
-    // ---- Q storage : 64 bytes packed (8 heads * 8 elements) ----
-    reg [511:0] Q_packed;    // 64 bytes
-    reg [511:0] Out_packed;  // 64 bytes
-    reg [3:0]   mh_h;        // index head courant (0..7)
-    // Q_flat fourni a attention_head_op : 8 bytes du head mh_h
-    wire [63:0] Q_flat = Q_packed[mh_h*64 +: 64];
+    // ---- Q storage : D bytes packed (H heads * HS elements) ----
+    reg [CFG_D*8-1:0] Q_packed;    // D bytes
+    reg [CFG_D*8-1:0] Out_packed;  // D bytes
+    reg [3:0]   mh_h;        // index head courant (0..H-1 ; 4 bits couvre H<=16)
+    // Q_flat fourni a attention_head_op : HS bytes du head mh_h
+    wire [CFG_HS*8-1:0] Q_flat = Q_packed[mh_h*(CFG_HS*8) +: CFG_HS*8];
 
     // ---- RMSNorm ----
     reg               rms_start;
@@ -675,14 +675,14 @@ module top #(
     wire [3:0]        rope_pair_idx;
     wire signed [31:0] dbg_rope_real, dbg_rope_imag;
 
-    rope_op #(.HS(8), .HALF(4)) u_rope (
+    rope_op #(.HS(CFG_HS), .HALF(CFG_HALF)) u_rope (
         .clk(clk_sys), .rst(rst), .start(rope_start), .done(rope_done),
         .shift_x(rope_shift_x), .shift_out(rope_shift_out),
         .x_raddr(rope_x_raddr), .x_rdata(x_rdata_reg),
         .out_waddr(rope_out_waddr), .out_wdata(rope_out_wdata), .out_we(rope_out_we),
         .pair_idx(rope_pair_idx),
-        .cos_in(cos_reg[rope_pair_idx[1:0]]),
-        .sin_in(sin_reg[rope_pair_idx[1:0]]),
+        .cos_in(cos_reg[rope_pair_idx[CFG_LOG2_HALF-1:0]]),
+        .sin_in(sin_reg[rope_pair_idx[CFG_LOG2_HALF-1:0]]),
         .dbg_new_real(dbg_rope_real), .dbg_new_imag(dbg_rope_imag)
     );
 
@@ -722,7 +722,7 @@ module top #(
     wire signed [7:0]  dbg_attn_max_score;
     wire [15:0]        dbg_attn_exp_sum, dbg_attn_inv_sum;
 
-    attention_head_op #(.HS(8), .T_MAX(32)) u_attn (
+    attention_head_op #(.HS(CFG_HS), .T_MAX(CFG_TMAX), .SCORE_SH(CFG_SCORE_SH)) u_attn (
         .clk(clk_sys), .rst(rst), .start(attn_start), .done(attn_done),
         .T(attn_T),
         .shift_q(attn_shift_q), .shift_k(attn_shift_k), .shift_v(attn_shift_v),
@@ -915,7 +915,7 @@ module top #(
         S_FM_RDW    = 7'd111,
         S_FM_WB     = 7'd112,    // wbuf[fetch_idx] <= sd_dout
         S_FM_DOT_ADDR  = 7'd113, // pipelined dot : amorce addr k=0 (1 cyc)
-        S_FM_DOT_ISSUE = 7'd114, // 1 elem/cycle -> mac18 (64 issues)
+        S_FM_DOT_ISSUE = 7'd114, // 1 elem/cycle -> mac18 (D+1=65 issues, read registeré 1-cyc)
         S_FM_DOT_DRAIN = 7'd115, // 3 cyc latence mac18, puis dot_acc = result
         S_FM_DOT_M     = 7'd116, // (inutilise, reserve)
         S_FM_STORE  = 7'd117,    // ecrit y[row] (4 oct LE) in obuf
@@ -1274,8 +1274,19 @@ module top #(
     // y_int32[fm_row] base is added back in S_FM_DOT_DRAIN.
     assign             mac_ce    = (state == S_FM_DOT_ISSUE) || (state == S_FM_DOT_DRAIN);
     assign             mac_load  = (state == S_FM_DOT_ISSUE) && (dot_k == 7'd0);
-    assign             mac_a     = (state == S_FM_DOT_DRAIN) ? 18'sd0 : {{2{fm_xs16[15]}}, fm_xs16};
-    assign             mac_b     = (state == S_FM_DOT_DRAIN) ? 18'sd0 : {{2{fm_ws16[15]}}, fm_ws16};
+    // mac_a/mac_b zeroed au dot_k==0 (cycle de load) : le read xbuf 1-cycle registeré
+    // presente xbuf[stale_addr] au cycle dot_k==0 (x_raddr_fm vaut 65 = valeur résiduelle
+    // de la fin du FQ précédent, donc lit xbuf[65]). Le mac_load=1 ici fait acc <= a*b
+    // = xbuf[65]*wbuf[65] (terme STALE) au cycle acc@4. Or xbuf[65] n'est non-zero que
+    // quand le MM a écrit K dans xbuf[0..T*KVW-1] avec T*KVW>65 (T>=3, i.e. pos>=2) -> le
+    // dot FQ est corrompu d'un terme stale K[65]*V[65] à partir de pos2 (wo/wv/wq...).
+    // Zeroer mac_a/mac_b au load -> acc@4 = 0 (load propre), puis xbuf[0..63] accumulés
+    // aux cycles suivants (xbuf[k] alimenté à dot_k=k+1, sommé à acc@k+5). xbuf[0..63]
+    // (les vrais termes) ne sont PAS affectés : ils entrent via a_r aux cycles dot_k>=1.
+    assign             mac_a     = (state == S_FM_DOT_DRAIN || mac_load)
+                                  ? 18'sd0 : {{2{fm_xs16[15]}}, fm_xs16};
+    assign             mac_b     = (state == S_FM_DOT_DRAIN || mac_load)
+                                  ? 18'sd0 : {{2{fm_ws16[15]}}, fm_ws16};
     reg  [1:0]         drain_cnt;
 
     assign rx_consume = rx_pending && (
@@ -1444,24 +1455,24 @@ module top #(
                 end
                 S_RR_RX_X: if (rx_pending) begin
                     xbuf_waddr <= rx_idx; xbuf_wdata <= $signed(rx_byte); xbuf_we <= 1'b1;
-                    if (rx_idx == 10'd7) begin rx_idx <= 10'd0; state <= S_RR_RX_COS; end
+                    if (rx_idx == (CFG_HS-1)) begin rx_idx <= 10'd0; state <= S_RR_RX_COS; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_RR_RX_COS: if (rx_pending) begin
-                    // 8 bytes = 4 int16 LE -> cos_reg[0..3]
+                    // 2*HALF bytes = HALF int16 LE -> cos_reg[0..HALF-1]
                     if (rx_idx[0] == 1'b0)
-                        cos_reg[rx_idx[2:1]][7:0]  <= rx_byte;
+                        cos_reg[rx_idx[CFG_LOG2_HS-1:1]][7:0]  <= rx_byte;
                     else
-                        cos_reg[rx_idx[2:1]][15:8] <= rx_byte;
-                    if (rx_idx == 10'd7) begin rx_idx <= 10'd0; state <= S_RR_RX_SIN; end
+                        cos_reg[rx_idx[CFG_LOG2_HS-1:1]][15:8] <= rx_byte;
+                    if (rx_idx == (CFG_HS-1)) begin rx_idx <= 10'd0; state <= S_RR_RX_SIN; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_RR_RX_SIN: if (rx_pending) begin
                     if (rx_idx[0] == 1'b0)
-                        sin_reg[rx_idx[2:1]][7:0]  <= rx_byte;
+                        sin_reg[rx_idx[CFG_LOG2_HS-1:1]][7:0]  <= rx_byte;
                     else
-                        sin_reg[rx_idx[2:1]][15:8] <= rx_byte;
-                    if (rx_idx == 10'd7) begin rope_start <= 1'b1; state <= S_RUN_ROPE; end
+                        sin_reg[rx_idx[CFG_LOG2_HS-1:1]][15:8] <= rx_byte;
+                    if (rx_idx == (CFG_HS-1)) begin rope_start <= 1'b1; state <= S_RUN_ROPE; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_RUN_ROPE: if (rope_done) state <= S_TX_M1;
@@ -1489,27 +1500,27 @@ module top #(
                 end
                 S_AA_T: if (rx_pending) begin
                     attn_T <= rx_byte[5:0];
-                    attn_kv_stride <= 6'd8;     // single-head : K layout = [t][hs]
+                    attn_kv_stride <= CFG_HS;     // single-head : K layout = [t][hs]
                     attn_kv_offset <= 6'd0;
                     mh_h <= 4'd0;
                     rx_idx <= 10'd0;
                     state <= S_AA_RX_Q;
                 end
                 S_AA_RX_Q: if (rx_pending) begin
-                    // packe in Q_packed[0..7] (mh_h=0 alimentera Q_flat)
-                    Q_packed[rx_idx[2:0]*8 +: 8] <= rx_byte;
-                    if (rx_idx == 10'd7) begin rx_idx <= 10'd0; state <= S_AA_RX_K; end
+                    // packe in Q_packed[0..HS-1] (mh_h=0 alimentera Q_flat)
+                    Q_packed[rx_idx[CFG_LOG2_HS-1:0]*8 +: 8] <= rx_byte;
+                    if (rx_idx == (CFG_HS-1)) begin rx_idx <= 10'd0; state <= S_AA_RX_K; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_AA_RX_K: if (rx_pending) begin
                     xbuf_waddr <= rx_idx; xbuf_wdata <= $signed(rx_byte); xbuf_we <= 1'b1;
-                    if (rx_idx == ({1'd0, attn_T, 3'd0} - 10'd1)) begin    // T*8-1
+                    if (rx_idx == ({1'd0, attn_T, {CFG_LOG2_HS{1'b0}}} - 10'd1)) begin    // T*HS-1
                         rx_idx <= 10'd0; state <= S_AA_RX_V;
                     end else rx_idx <= rx_idx + 10'd1;
                 end
                 S_AA_RX_V: if (rx_pending) begin
                     wbuf_waddr <= rx_idx; wbuf_wdata <= $signed(rx_byte); wbuf_we <= 1'b1;
-                    if (rx_idx == ({1'd0, attn_T, 3'd0} - 10'd1)) begin    // T*8-1
+                    if (rx_idx == ({1'd0, attn_T, {CFG_LOG2_HS{1'b0}}} - 10'd1)) begin    // T*HS-1
                         attn_start <= 1'b1; state <= S_RUN_ATTN;
                     end else rx_idx <= rx_idx + 10'd1;
                 end
@@ -1531,41 +1542,41 @@ module top #(
                 end
                 S_MM_T: if (rx_pending) begin
                     attn_T <= rx_byte[5:0];
-                    attn_kv_stride <= 6'd32;   // multi-head GQA : K layout = [t][kvh][hs]
+                    attn_kv_stride <= CFG_KVW;   // multi-head GQA : K layout = [t][kvh][hs]
                     rx_idx <= 10'd0;
                     state  <= S_MM_RX_Q;
                 end
                 S_MM_RX_Q: if (rx_pending) begin
-                    Q_packed[rx_idx[5:0]*8 +: 8] <= rx_byte;
-                    if (rx_idx == 10'd63) begin rx_idx <= 10'd0; state <= S_MM_RX_K; end
+                    Q_packed[rx_idx[CFG_DBITS-1:0]*8 +: 8] <= rx_byte;
+                    if (rx_idx == (CFG_D-1)) begin rx_idx <= 10'd0; state <= S_MM_RX_K; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_MM_RX_K: if (rx_pending) begin
-                    // K stocke in xbuf[0..T*32-1]
+                    // K stocke in xbuf[0..T*KVW-1]
                     xbuf_waddr <= rx_idx; xbuf_wdata <= $signed(rx_byte); xbuf_we <= 1'b1;
-                    if (rx_idx == ({1'd0, attn_T, 5'd0} - 12'd1)) begin   // T*32-1, max 1023
+                    if (rx_idx == ({1'd0, attn_T, {CFG_KVWBITS{1'b0}}} - 12'd1)) begin   // T*KVW-1
                         rx_idx <= 10'd0; state <= S_MM_RX_V;
                     end else rx_idx <= rx_idx + 10'd1;
                 end
                 S_MM_RX_V: if (rx_pending) begin
                     wbuf_waddr <= rx_idx; wbuf_wdata <= $signed(rx_byte); wbuf_we <= 1'b1;
-                    if (rx_idx == ({1'd0, attn_T, 5'd0} - 12'd1)) begin
+                    if (rx_idx == ({1'd0, attn_T, {CFG_KVWBITS{1'b0}}} - 12'd1)) begin
                         mh_h <= 4'd0;
                         state <= S_MM_HEAD;
                     end else rx_idx <= rx_idx + 10'd1;
                 end
                 // loop multi-head : pour h=0..H-1, configure kv_offset, run attn, copie output
                 S_MM_HEAD: begin
-                    // kv_offset = kvh * HS = (h >> 1) * 8 = {h[3:1], 3'd0}
-                    attn_kv_offset <= {1'b0, mh_h[3:1], 3'd0};
+                    // kv_offset = kvh * HS = (h / NREP) * HS = (h >> log2 NREP) * HS
+                    attn_kv_offset <= (mh_h >> CFG_LOG2_NREP) * CFG_HS;
                     attn_start     <= 1'b1;
                     state          <= S_MM_WAIT;
                 end
                 S_MM_WAIT: if (attn_done) begin
-                    rx_idx <= 10'd0;   // reuse comme copy index 0..7
+                    rx_idx <= 10'd0;   // reuse comme copy index 0..HS-1
                     state  <= S_MM_COPY1;
                 end
-                // Copie obuf[0..7] -> Out_packed[mh_h*64..mh_h*64+63]
+                // Copie obuf[0..HS-1] -> Out_packed[mh_h*HS*8 .. +HS*8-1]
                 S_MM_COPY1: begin
                     obuf_raddr <= rx_idx;
                     state      <= S_MM_COPY2;
@@ -1573,12 +1584,12 @@ module top #(
                 S_MM_COPY2: state <= S_MM_COPY3;
                 S_MM_COPY3: begin
                     // obuf_rdata_reg valide
-                    Out_packed[(mh_h*64) + (rx_idx[2:0]*8) +: 8] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd7) state <= S_MM_NEXT;
+                    Out_packed[(mh_h*(CFG_HS*8)) + (rx_idx[CFG_LOG2_HS-1:0]*8) +: 8] <= obuf_rdata_reg;
+                    if (rx_idx == (CFG_HS-1)) state <= S_MM_NEXT;
                     else begin rx_idx <= rx_idx + 10'd1; state <= S_MM_COPY1; end
                 end
                 S_MM_NEXT: begin
-                    if (mh_h == 4'd7) begin
+                    if (mh_h == (CFG_H-1)) begin
                         if (gg_active) begin
                             op_sel <= 4'd10;         // restore op_gg
                             rx_idx <= 10'd0;
@@ -1795,10 +1806,6 @@ module top #(
                 S_FM_SW: if (rx_pending) begin rms_shift_w <= $signed(rx_byte); rx_idx <= 10'd0; state <= S_FM_RX_X; end
                 S_FM_RX_X: if (rx_pending) begin
                     xbuf_waddr <= rx_idx; xbuf_wdata <= $signed(rx_byte); xbuf_we <= 1'b1;
-`ifdef SIM_DEBUG
-                    if (rx_idx <= 10'd2 || rx_idx == 10'd63)
-                        $display("[SIM] FM_RX_X idx=%0d byte=%0d", rx_idx, $signed(rx_byte));
-`endif
                     if (rx_idx == 10'd63) begin rx_idx <= 10'd0; state <= S_FM_A0; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
@@ -1862,13 +1869,17 @@ module top #(
                     end
                 end
 
-                // Phase 2: pipelined dot product x[k]*w[k] sur K=64 via mac18 (DSP).
-                // ADDR (1 cyc) : amorce addr k=0 (valeur dispo au cycle ISSUE suivant).
-                // ISSUE (64 cyc) : 1 elem/cycle, mac_ce=1, load=1 au k=0 (overwrite) puis
-                //   accumulate ; addr k+1 presentee pour la valeur du cycle suivant.
-                // DRAIN (3 cyc) : mac_ce=0, attend la latence 3 cycles du mac18, puis
+                // Phase 2: pipelined dot product x[k]*w[k] sur K=D via mac18 (DSP).
+                // ADDR (1 cyc) : amorce addr k=0. Le read xbuf est registeré 1-cycle,
+                //   donc x_rdata_reg au cycle ISSUE dot_k=N = xbuf[N-1] (off-by-one) :
+                //   xbuf[0] n'apparait qu'au dot_k=1.
+                // ISSUE (D+1=65 cyc) : 1 elem/cycle, mac_ce=1, load=1 au k=0 (overwrite
+                //   du stale 0->acc=0, cf init BSRAM 0) puis accumulate. Le loop dot_k=0..D
+                //   nourrit xbuf[0..D-1] aux cycles 1..D (sinon xbuf[D-1] etait rate).
+                // DRAIN (3 cyc) : mac_ce=1, feed a=b=0, attend la latence pipeline, puis
                 //   dot_acc = mac_result[31:0] + (gg_accumulate ? y_int32[fm_row] : 0).
-                // Total ~68 cyc/line vs 256 (4 cyc/elem * 64).
+                //   3 cyc suffisent : last ISSUE a cycle C -> produit ajoute a C+2,
+                //   dot_acc latche a C+3 (drain_cnt==2).
                 S_FM_DOT_ADDR: begin
                     x_raddr_fm <= {3'd0, 7'd0};
                     w_raddr_fm <= {3'd0, 7'd0};
@@ -1879,15 +1890,8 @@ module top #(
                     // fm_xs16 = xbuf[dot_k] (addr set previous cycle), fed to mac18 this cycle
                     x_raddr_fm <= {3'd0, dot_k + 7'd1};   // prefetch k+1 for next cycle
                     w_raddr_fm <= {3'd0, dot_k + 7'd1};
-`ifdef SIM_DEBUG
-                    if (dot_k == 7'd0)
-                        $display("[SIM] FQ k0 row=%0d N=%0d xa=%0d wa=%0d x0=%0d w0=%0d xr=%0d wr=%0d",
-                                 fm_row, fm_N, x_raddr_fm, w_raddr_fm,
-                                 $signed(xbuf[0]), $signed(wbuf[0]),
-                                 $signed(x_rdata_reg), $signed(w_rdata_reg));
-`endif
-                    if (dot_k == 7'd63) begin
-                        state <= S_FM_DOT_DRAIN;          // 64th issue done, mac_ce drops next cyc
+                    if (dot_k == 7'd64) begin
+                        state <= S_FM_DOT_DRAIN;          // D+1 issues done (xbuf[0..D-1] fed)
                     end else begin
                         dot_k <= dot_k + 7'd1;
                     end
@@ -2263,7 +2267,7 @@ module top #(
                     rms_shift_w <= gg_sh_q;         // weight shift = sh_q
                     op_sel      <= 4'd7;            // bascule sur op_fm pour FQ
                     fq_mode     <= 1'b1;
-                    fm_N        <= 7'd64;           // H * HS = 64
+                    fm_N        <= CFG_D;           // H * HS = D
                     fm_row      <= 7'd0;
                     fetch_idx   <= 7'd0;
                     state       <= S_FM_WARMUP_RD;
@@ -2294,7 +2298,7 @@ module top #(
                     rms_shift_w <= gg_sh_k;
                     op_sel      <= 4'd7;
                     fq_mode     <= 1'b1;
-                    fm_N        <= 7'd32;            // KH * HS
+                    fm_N        <= CFG_KVW;            // KH * HS = KVW
                     fm_row      <= 7'd0;
                     fetch_idx   <= 7'd0;
                     state       <= S_FM_WARMUP_RD;
@@ -2307,8 +2311,8 @@ module top #(
                 S_GG_SAVE_K_W1: state <= S_GG_SAVE_K_W2;
                 S_GG_SAVE_K_W2: state <= S_GG_SAVE_K_WB;
                 S_GG_SAVE_K_WB: begin
-                    gg_k_packed[rx_idx[4:0]*8 +: 8] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd31) begin
+                    gg_k_packed[rx_idx[CFG_KVWBITS-1:0]*8 +: 8] <= obuf_rdata_reg;
+                    if (rx_idx == (CFG_KVW-1)) begin
                         gg_sh_k_out  <= fq_shift_total;
                         gg_qkv_phase <= 4'd2;
                         rx_idx       <= 10'd0;
@@ -2325,7 +2329,7 @@ module top #(
                     rms_shift_w <= gg_sh_v;
                     op_sel      <= 4'd7;
                     fq_mode     <= 1'b1;
-                    fm_N        <= 7'd32;
+                    fm_N        <= CFG_KVW;
                     fm_row      <= 7'd0;
                     fetch_idx   <= 7'd0;
                     state       <= S_FM_WARMUP_RD;
@@ -2338,8 +2342,8 @@ module top #(
                 S_GG_SAVE_V_W1: state <= S_GG_SAVE_V_W2;
                 S_GG_SAVE_V_W2: state <= S_GG_SAVE_V_WB;
                 S_GG_SAVE_V_WB: begin
-                    gg_v_packed[rx_idx[4:0]*8 +: 8] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd31) begin
+                    gg_v_packed[rx_idx[CFG_KVWBITS-1:0]*8 +: 8] <= obuf_rdata_reg;
+                    if (rx_idx == (CFG_KVW-1)) begin
                         gg_sh_v_out <= fq_shift_total;
                         rx_idx      <= 10'd0;
                         state       <= S_GG_LOAD_KV;     // v3 : passe a attention
@@ -2352,12 +2356,12 @@ module top #(
                 S_GG_LOAD_KV: begin
                     // T=1 : K[0..31] -> xbuf[0..31], V[0..31] -> wbuf[0..31]
                     xbuf_waddr <= rx_idx;
-                    xbuf_wdata <= gg_k_packed[rx_idx[4:0]*8 +: 8];
+                    xbuf_wdata <= gg_k_packed[rx_idx[CFG_KVWBITS-1:0]*8 +: 8];
                     xbuf_we    <= 1'b1;
                     wbuf_waddr <= rx_idx;
-                    wbuf_wdata <= gg_v_packed[rx_idx[4:0]*8 +: 8];
+                    wbuf_wdata <= gg_v_packed[rx_idx[CFG_KVWBITS-1:0]*8 +: 8];
                     wbuf_we    <= 1'b1;
-                    if (rx_idx == 10'd31) state <= S_GG_SETUP_MM;
+                    if (rx_idx == (CFG_KVW-1)) state <= S_GG_SETUP_MM;
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_GG_SETUP_MM: begin
@@ -2366,7 +2370,7 @@ module top #(
                     attn_shift_k   <= gg_sh_k_out;
                     attn_shift_v   <= gg_sh_v_out;
                     attn_T         <= 6'd1;
-                    attn_kv_stride <= 6'd32;       // multi-head : [t][kvh][hs]
+                    attn_kv_stride <= CFG_KVW;       // multi-head : [t][kvh][hs]
                     mh_h           <= 4'd0;
                     op_sel         <= 4'd5;        // op_mh pour loop MM
                     state          <= S_MM_HEAD;   // reuse flow MM existant

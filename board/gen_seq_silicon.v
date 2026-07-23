@@ -165,6 +165,8 @@ module gen_seq_silicon #(
     wire        n_kv_refresh; wire [7:0] n_sd_dout;  wire n_sd_busy;
 
     gen_seq #(.W(W), .D(D), .NL(NL), .NPOS(NPOS), .NPR(NPR),
+              .H(CFG_H), .KH(CFG_KH), .HS(CFG_HS),
+              .VOCAB(CFG_VOCAB), .NCHUNK(CFG_NCHUNK), .TMAX(CFG_TMAX),
               .HID(CFG_HID), .LSTRIDE(CFG_LSTRIDE), .LBASE(CFG_LBASE),
               .OFF_W1(CFG_OFF_W1), .OFF_W3(CFG_OFF_W3), .OFF_W2(CFG_OFF_W2)) u_seq (
         .clk(clk), .rst_n(rst_n & seq_rst_n), .start(start_pulse), .gen_mode(1'b1),

@@ -28,7 +28,8 @@
 
 module attention_head_op #(
     parameter HS    = 8,
-    parameter T_MAX = 32
+    parameter T_MAX = 32,
+    parameter SCORE_SH = 0          // pre-shift du score avant clip int16 (calibrage HS, 0=HS=8)
 ) (
     input  wire              clk,
     input  wire              rst,
@@ -186,7 +187,7 @@ module attention_head_op #(
     reg signed [15:0] qi16, ki16;
     reg signed [31:0] qk_prod;
     always @(*) begin
-        qi16 = {{8{Q_reg[i_idx[2:0]][7]}}, Q_reg[i_idx[2:0]]};
+        qi16 = {{8{Q_reg[i_idx][7]}}, Q_reg[i_idx]};
         ki16 = {{8{k_rdata[7]}}, k_rdata};
         qk_prod = qi16 * ki16;
     end
@@ -259,10 +260,12 @@ module attention_head_op #(
 
                 S_SC_STORE: begin
                     begin: store_score
+                        reg signed [31:0] dot_sh;
                         reg signed [15:0] sval;
-                        if      (dot_acc > 32'sd32767)  sval = 16'sd32767;
-                        else if (dot_acc < -32'sd32768) sval = -16'sd32768;
-                        else                            sval = dot_acc[15:0];
+                        dot_sh = dot_acc >>> SCORE_SH;     // pre-shift calibrage HS (0 = HS=8)
+                        if      (dot_sh > 32'sd32767)  sval = 16'sd32767;
+                        else if (dot_sh < -32'sd32768) sval = -16'sd32768;
+                        else                           sval = dot_sh[15:0];
                         scores_packed[t_idx*16 +: 16] <= sval;
                     end
                     if (t_idx == T - 6'd1) begin
@@ -364,7 +367,7 @@ module attention_head_op #(
                     end
                 end
                 S_OUT_STORE: begin
-                    out_waddr <= {7'd0, d_idx[2:0]};
+                    out_waddr <= {6'd0, d_idx[3:0]};
                     out_wdata <= out_clip;
                     out_we    <= 1'b1;
                     if (d_idx == HS - 1) begin

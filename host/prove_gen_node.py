@@ -71,8 +71,14 @@ RSQRT_LUT = load_hex("rsqrt_lut.hex", signed=False)   # 256 Q1.15 unsigned
 EXP_LUT   = load_hex("exp_lut.hex",   signed=False)   # 256 Q15   unsigned
 INV_LUT   = load_hex("inv_lut.hex",   signed=False)   # 256 Q15   unsigned
 SILU_LUT  = load_hex("silu_lut.hex",  signed=True)    # 256 Q4.11 signed
-COS_ROM   = load_hex("freq_cis_cos.hex", signed=True) # 68 Q15 signed (17 pos × 4)
+COS_ROM   = load_hex("freq_cis_cos.hex", signed=True) # 68 Q15 signed (17 pos × 4, HS=8)
 SIN_ROM   = load_hex("freq_cis_sin.hex", signed=True)
+# ROM HS=16 (rework HS) : 136 entries (17 pos × 8). Présentes si lut/freq_cis_*_hs16.hex.
+def _try_load(name):
+    p = os.path.join(LUT, name)
+    return load_hex(name, signed=True) if os.path.exists(p) else None
+COS_ROM_16 = _try_load("freq_cis_cos_hs16.hex")
+SIN_ROM_16 = _try_load("freq_cis_sin_hs16.hex")
 SQRT2_Q15 = 0xB505
 
 
@@ -206,9 +212,10 @@ def silu_lut(x_i8, sx):
 
 # ---- RoPE (adapté de src/rope_op.v + test_rope.rope_ref) ---------------------
 def rope_q15(x_i8, sx, cos_q15, sin_q15):
-    """RoPE Q15 sur 8 éléments (4 paires). shift_out = sx."""
-    out = np.zeros(8, dtype=np.int8)
-    for i in range(4):
+    """RoPE Q15 sur HS éléments (HALF paires). shift_out = sx. HS dérivé de x_i8."""
+    HS = x_i8.shape[0]; HALF = HS // 2
+    out = np.zeros(HS, dtype=np.int8)
+    for i in range(HALF):
         xr = int(x_i8[2 * i]); xi = int(x_i8[2 * i + 1])
         c = int(cos_q15[i]); s = int(sin_q15[i])
         nr = xr * c - xi * s
@@ -223,11 +230,13 @@ def rope_q15(x_i8, sx, cos_q15, sin_q15):
 # attn_ref_fpga (test_attention.py) qui tronque. Le RTL (attention_head_op.v:142)
 # utilise score_curr = score_at_idx (16-bit) - max_ext_lshift, donc garde le low
 # byte. C'est crucial pour le near-tie @token 9.
-def attention_head_lut(Q_i8, K_i8, V_i8, T):
-    """Attention 1 head, HS=8, T positions. Retourne out_i8[8]. shift_out = sV (appelant)."""
-    HS = 8
-    # 1) scores = Q.K[t] clipé int16
+def attention_head_lut(Q_i8, K_i8, V_i8, T, score_sh=0):
+    """Attention 1 head, HS dynamique, T positions. Retourne out_i8[HS]. shift_out = sV (appelant).
+    score_sh = pre-shift du score avant clip int16 (calibrage HS, 0=HS=8, 1=HS=16)."""
+    HS = Q_i8.shape[0]
+    # 1) scores = (Q.K[t] >>> score_sh) clipé int16
     y = Q_i8.astype(np.int64) @ K_i8.astype(np.int64).T   # [T] int64
+    y = y >> score_sh                                      # arith pre-shift (0 = HS=8 inchangé)
     scores = np.clip(y, -32768, 32767)                   # int16 signed
     # 2) max sur high-byte (score>>8 int8 signed)
     proxy = (scores >> 8).astype(np.int64)               # arith, = signed high byte
@@ -346,6 +355,11 @@ def forward_node(m, n_tokens=17):
     NL = cfg['n_layers']; H = cfg['n_heads']; KH = cfg['n_kv_heads']
     HS = cfg['head_size']; D = cfg['dim']
     TMAX = 32; KVW = KH * HS
+    HALF = HS // 2; NREP = H // KH
+    score_sh = int(cfg.get('score_sh', 0))   # pre-shift score (0=HS=8, 1=HS=16)
+    # ROM RoPE selon HS (HS=16 -> fichiers _hs16, sinon HS=8)
+    cos_rom = COS_ROM_16 if (HS == 16 and COS_ROM_16 is not None) else COS_ROM
+    sin_rom = SIN_ROM_16 if (HS == 16 and SIN_ROM_16 is not None) else SIN_ROM
     # KV cache persistant (seed -128 pour les shifts, cf gen_seq pitfall #2)
     kmem = np.zeros((NL, TMAX, KH, HS), dtype=np.int8)
     vmem = np.zeros((NL, TMAX, KH, HS), dtype=np.int8)
@@ -355,8 +369,8 @@ def forward_node(m, n_tokens=17):
     cur_tok = 1  # BOS (prompt_len=0)
     out = []
     for pos in range(n_tokens):
-        cos_q15 = COS_ROM[pos * 4:pos * 4 + 4]
-        sin_q15 = SIN_ROM[pos * 4:pos * 4 + 4]
+        cos_q15 = cos_rom[pos * HALF:pos * HALF + HALF]
+        sin_q15 = sin_rom[pos * HALF:pos * HALF + HALF]
         # ---- EE : embedding ----
         XB = m['tok_emb'][cur_tok].astype(np.int8).copy()
         sxb = m['tok_emb_s']
@@ -381,10 +395,10 @@ def forward_node(m, n_tokens=17):
             # ---- SCAN max shifts ----
             sKref = int(ksh[l, 0:pos + 1].max())
             sVref = int(vsh[l, 0:pos + 1].max())
-            # ---- MM : 8 heads (GQA nrep=2) ----
+            # ---- MM : H heads (GQA nrep=NREP) ----
             ATT = np.zeros(D, dtype=np.int8)
             for h in range(H):
-                kh = h // 2
+                kh = h // NREP
                 Qh = Q[h * HS:(h + 1) * HS]
                 T = pos + 1
                 # re-align K/V par position (clip8(mem >>> (ref-sh)))
@@ -392,7 +406,7 @@ def forward_node(m, n_tokens=17):
                 shV = sVref - vsh[l, 0:T].astype(np.int64)
                 K_h = clip8((kmem[l, 0:T, kh].astype(np.int64) >> shK[:, None]))
                 V_h = clip8((vmem[l, 0:T, kh].astype(np.int64) >> shV[:, None]))
-                ATT[h * HS:(h + 1) * HS] = attention_head_lut(Qh, K_h, V_h, T)
+                ATT[h * HS:(h + 1) * HS] = attention_head_lut(Qh, K_h, V_h, T, score_sh)
             sA = sVref
             # ---- FQ wo(ATT) -> OUTV ----
             OUTV, sOut = fq_matvec(w['wo'], ATT, sA, w['wo_s'])

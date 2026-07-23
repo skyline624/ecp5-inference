@@ -27,8 +27,8 @@ import json
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DUMP = os.path.join(HERE, "gen_model_dump.json")
-OUT_HEX = os.path.join(HERE, "..", "sim", "sdram_preload.hex")
+DUMP = os.environ.get("DUMP", os.path.join(HERE, "gen_model_dump.json"))
+OUT_HEX = os.environ.get("OUT_HEX", os.path.join(HERE, "..", "sim", "sdram_preload.hex"))
 
 # Shape lue depuis le dump (m['cfg'], lui-même issu du header modèle llama2.c) ->
 # plus de magic numbers hardcodés. Les offsets OFF/LBASE/LSTRIDE restent fixés pour

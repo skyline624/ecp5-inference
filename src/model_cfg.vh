@@ -24,16 +24,40 @@
 localparam CFG_D    = 64;     // dim
 localparam CFG_HID  = 172;    // hidden_dim (champ header modèle llama2.c)
 localparam CFG_NL   = 5;      // n_layers
+// head_size paramétrable (rework HS) : HS/H/KH/SCORE_SH surchargeables via
+// `HS16_PROFILE pour la preuve HS=16 (D=H*HS=64, KVW=KH*HS=32 inchangés -> isole
+// le rework HS). Défaut = stories260K HS=8. CFG_SCORE_SH = pre-shift du score
+// d'attention avant le clip int16 (calibrage ALU dépendant de HS, pas un weight
+// shift) : 0 pour HS=8 (non-régression bit-exact par construction), 1 pour HS=16.
+`ifdef HS16_PROFILE
+localparam CFG_HS   = 16;     // head_size (preuve rework HS, H*HS=64 inchangé)
+localparam CFG_H    = 4;      // n_heads  (D=H*HS=4*16=64)
+localparam CFG_KH   = 2;      // n_kv_heads (KVW=KH*HS=2*16=32 inchangé, NREP=2)
+localparam CFG_SCORE_SH = 1;  // pre-shift score (HS=16: raw dot 258k >>>1 = 129k, clip comme HS=8)
+`else
 localparam CFG_HS   = 8;      // head_size
 localparam CFG_H    = 8;      // n_heads
 localparam CFG_KH   = 4;      // n_kv_heads (GQA, n_rep = H/KH = 2)
+localparam CFG_SCORE_SH = 0;  // pre-shift score (0 = comportement historique HS=8)
+`endif
 localparam CFG_VOCAB= 512;
 localparam CFG_NN   = 1;      // tensor-parallel degree (première livraison : single-node)
 localparam CFG_NC   = 5;      // NC_LAYERS_CACHED : 0=stream .. NL=cache-all (STATIC)
 
-// --- dérivés (retire les magic numbers 12288/36864/184320/0xC200/0x3200/...) ---
+// --- dérivés HS/head-shape (retire les magic numbers 8/4/32/64 du datapath attention) ---
 localparam CFG_KVW    = CFG_KH*CFG_HS;                       // 32 (KV width par couche)
 localparam CFG_NREP   = CFG_H/CFG_KH;                        // 2 (GQA repeat)
+localparam CFG_HALF   = CFG_HS/2;                            // 4 (paires RoPE, entries cos/sin_reg)
+localparam CFG_LOG2_HS   = $clog2(CFG_HS);                   // 3 (slice i_idx/d_idx, shift << HS)
+localparam CFG_LOG2_HALF = $clog2(CFG_HALF);                 // 2 (index cos/sin_reg)
+localparam CFG_LOG2_NREP = $clog2(CFG_NREP);                 // 1 (mh_h >> log2(NREP) pour kv_offset)
+localparam CFG_HBITS   = $clog2(CFG_H);                      // 3 (largeur mh_h ; 4 pour H<=16)
+localparam CFG_DBITS   = $clog2(CFG_D);                      // 6 (index Q_packed D-byte)
+localparam CFG_KVWBITS = $clog2(CFG_KVW);                    // 5 (index gg_k/v_packed)
+localparam CFG_NPOS    = 17;                                 // generation length (token loop)
+localparam CFG_TMAX    = 32;                                 // max sequence length (attention T)
+localparam CFG_NCHUNK  = CFG_VOCAB/CFG_D;                    // 8 (lm_head chunks)
+localparam CFG_NPR     = 16;                                 // max prompt tokens (prefill)
 // FFN layout : HID padded au multiple de D supérieur, chunké en blocs [D,D]
 // (cohérent avec gen_seq.v "HID chunked 3x64" : 172 -> 192 = 3*64).
 localparam CFG_HIDPAD  = ((CFG_HID+CFG_D-1)/CFG_D)*CFG_D;     // 172 -> 192

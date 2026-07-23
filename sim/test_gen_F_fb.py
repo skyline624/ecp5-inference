@@ -22,9 +22,9 @@ from cocotb.triggers import RisingEdge, ClockCycles, First
 import json, os
 
 N_TOK = int(os.environ.get("NTOK", "17"))
-NL = 5
-DUMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "host",
-                    "gen_model_dump.json")
+NL = 5   # surchargé depuis m['cfg']['n_layers'] au chargement du dump
+DUMP = os.environ.get("DUMP", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                    "..", "host", "gen_model_dump.json"))
 
 FILL_TIMEOUT_CYC = 4_000_000   # ~4M cyc budget for cache fill (NC*36864 SDRAM reads)
 GEN_TIMEOUT_CYC = 35_000_000   # ~35M cyc budget for 17 tokens (~1.65M cyc/tok)
@@ -112,8 +112,10 @@ def _peek_dbg(dut, idx):
 
 @cocotb.test()
 async def test_gen_F_fb(dut):
+    global NL
     with open(DUMP) as f:
         m = json.load(f)
+    NL = int(m['cfg']['n_layers'])
     expect = m['node_tokens'][:N_TOK]
     assert len(expect) == N_TOK, f"oracle has {len(m['node_tokens'])} tokens, need {N_TOK}"
 

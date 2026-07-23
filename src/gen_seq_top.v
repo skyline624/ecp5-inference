@@ -19,7 +19,11 @@ module gen_seq_top #(
     output wire signed [7:0] result_sh,
     output wire [9:0]     token,
     output wire           token_valid,
-    output wire           done
+    output wire           done,
+    // sonde sim-only : cache FFN BRAM rempli (path silicium FLASH_BOOT). Permet au
+    // TB Verilog pur / au TB C++ Verilator d'attendre le fill SANS ref hierarchique
+    // (dut.u_n.wcache_fill_done). Sempre 1 hors FLASH_BOOT (pas de cache fill).
+    output wire           sim_fill_done
 );
     `include "model_cfg.vh"
     // gen_seq shape from model_cfg.vh (source unique) : HID/LSTRIDE/OFF_*/LBASE.
@@ -53,9 +57,14 @@ module gen_seq_top #(
     wire [47*8-1:0] shifts_out_w;
     wire        shifts_valid_w;
     wire        wcache_fill_done_w;
+    assign      sim_fill_done = wcache_fill_done_w;   // sonde sim-only (cache rempli)
+`else
+    assign      sim_fill_done = 1'b1;                 // pas de cache fill hors FLASH_BOOT
 `endif
 
     gen_seq #(.W(W), .D(D), .NL(NL), .NPOS(NPOS),
+              .H(CFG_H), .KH(CFG_KH), .HS(CFG_HS),
+              .VOCAB(CFG_VOCAB), .NCHUNK(CFG_NCHUNK), .TMAX(CFG_TMAX),
               .HID(CFG_HID), .LSTRIDE(CFG_LSTRIDE), .LBASE(CFG_LBASE),
               .OFF_W1(CFG_OFF_W1), .OFF_W3(CFG_OFF_W3), .OFF_W2(CFG_OFF_W2)) u_seq (
         .clk(clk), .rst_n(rst_n), .start(start), .gen_mode(gen_mode),

@@ -18,7 +18,9 @@ param(
     [string]$Top    = "gen_seq_top",
     [switch]$LogFile,
     [switch]$FlashBoot,
-    [switch]$SimDebug
+    [switch]$SimDebug,
+    [switch]$Hs16,
+    [string]$DumpFile = ""        # override du dump (ex: Strat A rand) ; sinon default -Hs16
 )
 
 $ErrorActionPreference = "Continue"
@@ -59,6 +61,17 @@ $srcList += "../src/node_top.v ../src/wcache_ffn.v ../src/sdram.v ../src/mac18.v
 $defs = "-DLINK_SS -DSDRAM_PRELOAD -DSIM"
 if ($FlashBoot) { $defs += " -DFLASH_BOOT" }
 if ($SimDebug) { $defs += " -DSIM_DEBUG" }
+if ($Hs16) {
+    $defs += " -DHS16_PROFILE"
+    # DUMP : -DumpFile override (ex Strat A rand) sinon default Strat B (stories reshape).
+    if ($DumpFile -ne "") {
+        $env:DUMP = (Resolve-Path $DumpFile -ErrorAction SilentlyContinue).Path
+        if (-not $env:DUMP) { $env:DUMP = $DumpFile }
+    } else {
+        $env:DUMP = Join-Path $PWD.Path "..\host\gen_model_dump_hs16.json"
+    }
+    Write-Host "==> HS16_PROFILE ON (DUMP=$env:DUMP, HS=16 H=4 KH=2 score_sh=1)" -ForegroundColor Magenta
+}
 Write-Host "==> iverilog compile ($Top -> $Top.vvp)" -ForegroundColor Cyan
 cmd /c "iverilog -o $Top.vvp -s $Top -g2012 $defs -I../src $srcList 2>&1"
 if ($LASTEXITCODE -ne 0) { throw "iverilog compile failed (exit $LASTEXITCODE)" }

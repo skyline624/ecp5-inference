@@ -30,9 +30,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 NPOS = int(os.environ.get("NPOS", 17))
 HS   = int(os.environ.get("HS", 8))
 THETA = float(os.environ.get("THETA", 10000.0))
+SUFFIX = os.environ.get("SUFFIX", "")   # ex "_hs16" pour generer freq_cis_cos_hs16.hex
 
-OUT_COS = os.path.join(HERE, "..", "lut", "freq_cis_cos.hex")
-OUT_SIN = os.path.join(HERE, "..", "lut", "freq_cis_sin.hex")
+OUT_COS = os.path.join(HERE, "..", "lut", f"freq_cis_cos{SUFFIX}.hex")
+OUT_SIN = os.path.join(HERE, "..", "lut", f"freq_cis_sin{SUFFIX}.hex")
 
 
 def make_freq_cis(seq_len, hs, theta):

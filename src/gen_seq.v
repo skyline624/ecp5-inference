@@ -96,13 +96,17 @@ module gen_seq #(
 );
     localparam KVW  = KH*HS;              // 32
     localparam NREP = H/KH;
+    // KV layout dérivé (retire les magic `<<6` = *2*KVW et `6'd32` = KVW) :
+    // K/V contigus par position, stride 2*KVW bytes, V décalé de KVW.
+    localparam KVW_SH  = $clog2(2*KVW);   // 6 (shift *2*KVW pour KVW=32)
+    localparam [5:0] KVW_LIT = KVW;       // 32 (offset V = KVW, largeur couvre KVW<=63)
     localparam NSLOTS = 8;
     // FFN chunking : HID padded au multiple de D supérieur, chunké en NCHUNK_F blocs [D,D]
     // (172 -> 192 = 3 chunks pour dim 64). Cohérent avec model_cfg.vh / node_top.wcache.
     localparam HIDPAD  = ((HID+D-1)/D)*D;
     localparam NCHUNK_F= HIDPAD/D;        // 3 pour stories260K
     localparam SW = 3;
-    localparam AW = SW + 6;
+    localparam AW = SW + $clog2(D);
     // Session 6b lever #2 (vfile fusion SB_P->SB_Vc, 8->7 slots) was tried and REVERTED :
     // it cut cell count (Logic -411, SSRAM -48) but WORSENED routing (789->931 unrouted)
     // by concentrating V/P accesses into one congested distributed-RAM hotspot. The node
@@ -114,7 +118,7 @@ module gen_seq #(
     // ---- register file (LUT-RAM) ----
     reg [7:0] vfile [0:NSLOTS*D-1];
     reg [AW-1:0] vaddr; reg [7:0] vdin; reg vwe;
-    function [AW-1:0] vidx; input [SW-1:0] slot; input [5:0] b; vidx = (slot<<6)|b; endfunction
+    function [AW-1:0] vidx; input [SW-1:0] slot; input [$clog2(D)-1:0] b; vidx = (slot<<$clog2(D))|b; endfunction
 
     // ---- KV cache : K/V en SDRAM externe (étape 1, plan §2.2), shifts on-chip ----
     // kmem/vmem (BSRAM 10 Ko, 6 DP16KD) déplacés en SDRAM @ KV_BASE. Le seq est 4e
@@ -276,10 +280,15 @@ module gen_seq #(
     (* ram_style = "block" *) reg signed [15:0] cos_rom [0:NPOS*(HS/2)-1];
     (* ram_style = "block" *) reg signed [15:0] sin_rom [0:NPOS*(HS/2)-1];
     initial begin
-        $readmemh("freq_cis_cos.hex", cos_rom);
+`ifdef HS16_PROFILE
+        $readmemh("freq_cis_cos_hs16.hex", cos_rom);   // 136 entries (NPOS*HALF, HS=16)
+        $readmemh("freq_cis_sin_hs16.hex", sin_rom);
+`else
+        $readmemh("freq_cis_cos.hex", cos_rom);        // 68 entries (NPOS*HALF, HS=8)
         $readmemh("freq_cis_sin.hex", sin_rom);
+`endif
     end
-    wire [6:0] rope_ridx = pos_reg*(HS/2) + rcp;
+    wire [$clog2(NPOS*(HS/2))-1:0] rope_ridx = pos_reg*(HS/2) + rcp;
     reg signed [15:0] crom, srom;
     always @(posedge clk) begin crom <= cos_rom[rope_ridx]; srom <= sin_rom[rope_ridx]; end
 
@@ -343,11 +352,13 @@ module gen_seq #(
                         PH_FN: begin
                             pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rms_l;
                             pkt[68]<=a0(base_l+OFF_RMS);pkt[69]<=a1(base_l+OFF_RMS);pkt[70]<=a2(base_l+OFF_RMS);
-                            pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0]; end
+                            pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0];
+                        end
                         PH_WQ: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=H*HS;pkt[3]<=sxn;pkt[4]<=swq_l;
                             pkt[69]<=a0(base_l+OFF_WQ);pkt[70]<=a1(base_l+OFF_WQ);pkt[71]<=a2(base_l+OFF_WQ);
-                            pkt_len<=72; resp_len<=3+H*HS; src_slot<=SB_XN; dst_slot<=SB_Q; Nfq<=H*HS; end
+                            pkt_len<=72; resp_len<=3+H*HS; src_slot<=SB_XN; dst_slot<=SB_Q; Nfq<=H*HS;
+                        end
                         PH_WK: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=KH*HS;pkt[3]<=sxn;pkt[4]<=swk_l;
                             pkt[69]<=a0(base_l+OFF_WK);pkt[70]<=a1(base_l+OFF_WK);pkt[71]<=a2(base_l+OFF_WK);
@@ -365,7 +376,8 @@ module gen_seq #(
                         PH_WO: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sA;pkt[4]<=swo_l;
                             pkt[69]<=a0(base_l+OFF_WO);pkt[70]<=a1(base_l+OFF_WO);pkt[71]<=a2(base_l+OFF_WO);
-                            pkt_len<=72; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_OUTV; Nfq<=D[7:0]; end
+                            pkt_len<=72; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_OUTV; Nfq<=D[7:0];
+                        end
                         // ---- FFN ----
                         PH_FN2: begin  // rmsnorm(XB, rms_ffn) -> XN
                             pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rmsf_l;
@@ -435,8 +447,8 @@ module gen_seq #(
                         kv_refresh_ret <= 2'd0;     // retour E_MREQ après refresh
                         st <= E_MREFRESH;
                     end else begin
-                        kv_addr <= KV_BASE + ((layer*TMAX + mmp) << 6)   // *2*KVW (=64)
-                                 + (mmv ? 6'd32 : 6'd0) + mmo;            // +KVW si V
+                        kv_addr <= KV_BASE + ((layer*TMAX + mmp) << KVW_SH)   // *2*KVW
+                                 + (mmv ? KVW_LIT : 6'd0) + mmo;              // +KVW si V
                         kv_rd   <= 1'b1;
                         st      <= E_MBUSY;
                     end
@@ -457,11 +469,6 @@ module gen_seq #(
                 E_MDONE: if (!kv_busy) begin
                     if (!mmv) kraw <= $signed(kv_dout);
                     else      vraw <= $signed(kv_dout);
-`ifdef SIM_DEBUG
-                    if (mmo==3'd0)
-                        $display("[SIM] E_MDONE mmv=%0d mmp=%0d mmo0 kv_dout=%0d",
-                                 mmv, mmp, $signed(kv_dout));
-`endif
                     st <= E_MMRD;
                 end
                 // KV cache byte : kraw/vraw now hold the SDRAM byte at the current
@@ -487,11 +494,6 @@ module gen_seq #(
 
                 // stream response; write vector bytes into dst_slot
                 RECV: if (rx_valid) begin
-`ifdef SIM_DEBUG
-                    if (rcnt==2 || rcnt==3)
-                        $display("[SIM] RECV phase=%0d lmchunk=%0d rcnt=%0d rx_data=%0d",
-                                 phase, lmchunk, rcnt, $signed(rx_data));
-`endif
                     if ((phase==PH_FN||phase==PH_FN2||phase==PH_FNF) && rcnt>=11 && rcnt<11+D)
                                                                   begin vaddr<=vidx(SB_XN, rcnt[5:0]-11); vdin<=rx_data; vwe<=1'b1; end
                     else if ((phase==PH_WQ||phase==PH_WK||phase==PH_WV||phase==PH_WO||
@@ -625,15 +627,9 @@ module gen_seq #(
                         kv_refresh_ret <= 2'd1;     // retour KVWR (phase K) après refresh
                         st <= E_MREFRESH;
                     end else begin
-                        kv_addr <= KV_BASE + ((layer*TMAX + pos_reg) << 6) + ldi[5:0];
+                        kv_addr <= KV_BASE + ((layer*TMAX + pos_reg) << KVW_SH) + ldi[5:0];
                         kv_din  <= vfile[vidx(SB_Kc, ldi[5:0])];
                         kv_wr   <= 1'b1;
-`ifdef SIM_DEBUG
-                        if (ldi[5:0]==6'd0)
-                            $display("[SIM] KVWR K ldi0 vKc0=%0d vQ0=%0d pos=%0d",
-                                     $signed(vfile[vidx(SB_Kc,6'd0)]),
-                                     $signed(vfile[vidx(SB_Q,6'd0)]), pos_reg);
-`endif
                         st      <= KVWR_KB;
                     end
                 end
@@ -647,7 +643,7 @@ module gen_seq #(
                         kv_refresh_ret <= 2'd2;     // retour KVWR_V (phase V) après refresh
                         st <= E_MREFRESH;
                     end else begin
-                        kv_addr <= KV_BASE + ((layer*TMAX + pos_reg) << 6) + 6'd32 + ldi[5:0];
+                        kv_addr <= KV_BASE + ((layer*TMAX + pos_reg) << KVW_SH) + KVW_LIT + ldi[5:0];
                         kv_din  <= vfile[vidx(SB_Vc, ldi[5:0])];
                         kv_wr   <= 1'b1;
                         st      <= KVWR_VB;
@@ -750,26 +746,6 @@ module gen_seq #(
                             end else begin
                                 // dernier token du prompt (prefill_left vient d'atteindre 0)
                                 // OU decode normal : émission + feed argmax (comportement actuel).
-`ifdef SIM_DEBUG
-                                // dump argmax state + XB/XN/logits samples to localize the
-                                // zero-token bug (logits all X/0 -> upstream XN/embed/SDRAM).
-                                $display("[SIM] emit tok=%0d pos=%0d best_val=%0d best_idx=%0d sref_lm=%0d csh=%0d %0d %0d %0d",
-                                         best_idx, pos_reg, best_val, best_idx, sref_lm,
-                                         $signed(csh[0]), $signed(csh[1]), $signed(csh[2]), $signed(csh[3]));
-                                $display("[SIM] XB[0:7]=%0d %0d %0d %0d %0d %0d %0d %0d",
-                                         $signed(vfile[0]),$signed(vfile[1]),$signed(vfile[2]),$signed(vfile[3]),
-                                         $signed(vfile[4]),$signed(vfile[5]),$signed(vfile[6]),$signed(vfile[7]));
-                                $display("[SIM] XN[0:7]=%0d %0d %0d %0d %0d %0d %0d %0d",
-                                         $signed(vfile[64]),$signed(vfile[65]),$signed(vfile[66]),$signed(vfile[67]),
-                                         $signed(vfile[68]),$signed(vfile[69]),$signed(vfile[70]),$signed(vfile[71]));
-                                $display("[SIM] logits[0:7]=%0d %0d %0d %0d %0d %0d %0d %0d",
-                                         $signed(logits[0]),$signed(logits[1]),$signed(logits[2]),$signed(logits[3]),
-                                         $signed(logits[4]),$signed(logits[5]),$signed(logits[6]),$signed(logits[7]));
-                                $display("[SIM] logits[400:410]=%0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d",
-                                         $signed(logits[400]),$signed(logits[401]),$signed(logits[402]),$signed(logits[403]),
-                                         $signed(logits[404]),$signed(logits[405]),$signed(logits[406]),$signed(logits[407]),
-                                         $signed(logits[408]),$signed(logits[409]),$signed(logits[410]));
-`endif
                                 token_valid <= 1'b1; cur_tok <= best_idx;   // emit + feed next EMBED
                                 if (pos_reg == NPOS-1) begin done<=1; st<=IDLE; end   // last token
                                 else begin  // next token : embed again, KV cache persists
