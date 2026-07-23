@@ -24,6 +24,11 @@ sim/sim_build_v2/
 build/sim_build/
 **/sim_build/
 
+# ---- Verilator build dir (regenerable : Vtop*.cpp/.obj, sim_top.exe, vpi_src) ----
+# Investigation Verilator+cocotb embed (cf memoire verilator-setup-investigation).
+# build_msvc.bat / patch_harness.py / run_verilator.bat sont des sources (racine sim/).
+sim/obj_dir/
+
 # ---- JSON synth reports (regenerable) ----
 # build/*.json sont des sorties nextpnr/yosys ; mais on ignore sélectivement :
 build/*.json

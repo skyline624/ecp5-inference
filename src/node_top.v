@@ -143,7 +143,8 @@ module top #(
 `endif
 );
 
-    localparam D = 64;
+    `include "model_cfg.vh"
+    localparam D = CFG_D;
     localparam BSRAM_SZ = 1024;  // bumped a 1024 pour MM T_MAX=32 (32*32=1024 bytes K/V)
 
     // ---- PLL : clk_sys 25 MHz + clk_sdram phase-shifted (ECP5 EHXPLLL) ----
@@ -180,6 +181,12 @@ module top #(
     reg  [9:0]  refresh_cnt = 10'd0;
     wire        refresh_due = (refresh_cnt >= 10'd472);    // ~15 us @31.25 MHz (378 cyc @25 MHz)
     reg         sd_refresh;
+`ifdef FLASH_BOOT
+    // eff_ref est assigne plus bas (mux eff_* @361) mais utilise ici dans le always
+    // refresh_cnt. icarus strict ne tolere pas l'usage-avant-declaration (cf ffn_hit_q
+    // ci-dessous) -> forward declare la wire, l'assign vient au mux.
+    wire        eff_ref;
+`endif
     always @(posedge clk_sys) begin
         if (rst)                          refresh_cnt <= 10'd0;
 `ifdef FLASH_BOOT
@@ -245,16 +252,16 @@ module top #(
     // Decodeur is_ffn_addr + mappeur cache_addr (cote lecture, FSM FQ).
     // sd_addr = base_l + OFF, base_l = 0x010000 + layer*0x10000 -> sd_addr[20:16]
     // = layer+1 (1..5). FFN occupe offset intra-couche [0x3200, 0xC200).
-    localparam [22:0] WCACHE_FFN_BASE  = 23'h013200;   // debut FFN couche 0
-    localparam [15:0] WCACHE_LAYER_SZ  = 16'd36864;    // 0x9000 = 3 matrices x 3 chunks x 4096
-    localparam [2:0]  WC_NLAYERS       = 3'd5;
+    // WCACHE_* proviennent de model_cfg.vh (CFG_WCACHE_FFN_BASE / CFG_WCACHE_LAYER_SZ /
+    // CFG_NC = NC_LAYERS_CACHED). NC cache les NC premieres couches FFN en BRAM au boot ;
+    // les couches >= NC sont streamees depuis SDRAM (path fallback). NC=0 = stream pur.
     reg  [2:0]  wc_state;
-    reg  [2:0]  wca_layer;       // 0..4 (couche courante du fill)
-    reg  [15:0] wca_off;         // 0..36863 (offset intra-couche)
+    reg  [2:0]  wca_layer;       // 0..NC-1 (couche courante du fill)
+    reg  [15:0] wca_off;         // 0..CFG_WCACHE_LAYER_SZ-1 (offset intra-couche)
     reg  [22:0] wca_sd_addr;     // source SDRAM
     reg         wca_sd_rd;
     reg         wca_refresh;
-    reg  [17:0] wc_waddr;        // port ecriture BRAM (compact : layer*36864 + off)
+    reg  [CFG_AW-1:0] wc_waddr;  // port ecriture BRAM (compact : layer*WCACHE_LAYER_SZ + off)
     reg  [7:0]  wc_wdata;
     reg         wc_we;
     reg         wcache_fill_done_r;   // sticky : 1 une fois le cache rempli
@@ -266,11 +273,10 @@ module top #(
     always @(posedge clk_sys or negedge rst_n) begin
         if (!rst_n) begin
             wc_state <= WC_IDLE;
-`ifdef WCACHE_OFF
-            wcache_fill_done_r <= 1'b1;   // cache desactive : simule fill done (gate H_GK passe, pas de fill)
-`else
-            wcache_fill_done_r <= 1'b0;
-`endif
+            // NC=0 (stream pur) : fill jamais lance, is_ffn_addr=0 (borne ff_layer_ok
+            // <= CFG_NC=0 toujours faux). Sinon fill au boot apres boot_done.
+            if (CFG_NC == 0) wcache_fill_done_r <= 1'b1;
+            else             wcache_fill_done_r <= 1'b0;
             wca_layer <= 3'd0; wca_off <= 16'd0; wca_sd_addr <= 23'd0;
             wca_sd_rd <= 1'b0; wca_refresh <= 1'b0;
             wc_waddr <= 18'd0; wc_wdata <= 8'd0; wc_we <= 1'b0;
@@ -282,7 +288,7 @@ module top #(
                     // demarre apres le boot flash (SDRAM peuplee), une seule fois.
                     if (boot_done && !wcache_fill_done_r) begin
                         wca_layer  <= 3'd0; wca_off <= 16'd0;
-                        wca_sd_addr <= WCACHE_FFN_BASE;
+                        wca_sd_addr <= CFG_WCACHE_FFN_BASE;
                         wc_state   <= WC_REF_CHK;
                     end
                 end
@@ -300,18 +306,18 @@ module top #(
                     // dout SDRAM valide -> ecrit dans la BRAM (compact layer*36864+off)
                     wc_we    <= 1'b1;
                     wc_wdata <= sd_dout;
-                    wc_waddr <= (wca_layer * 18'd36864) + {2'd0, wca_off};
+                    wc_waddr <= (wca_layer * CFG_WCACHE_LAYER_SZ) + {2'd0, wca_off};
                     wca_sd_addr <= wca_sd_addr + 23'd1;
-                    if (wca_off == WCACHE_LAYER_SZ - 16'd1) begin
+                    if (wca_off == CFG_WCACHE_LAYER_SZ - 16'd1) begin
                         // fin de couche -> couche suivante (saute le gap attention inter-couche)
-                        if (wca_layer == WC_NLAYERS - 3'd1) begin
-                            wcache_fill_done_r <= 1'b1;     // 5 couches faites
+                        if (wca_layer == CFG_NC - 3'd1) begin
+                            wcache_fill_done_r <= 1'b1;     // NC couches faites
                             wc_state <= WC_IDLE;
                         end else begin
                             wca_layer <= wca_layer + 3'd1;
                             wca_off   <= 16'd0;
-                            // base FFN couche (L+1) = 0x013200 + (L+1)*0x10000
-                            wca_sd_addr <= WCACHE_FFN_BASE + {wca_layer + 3'd1, 16'd0};
+                            // base FFN couche (L+1) = CFG_WCACHE_FFN_BASE + (L+1)*0x10000
+                            wca_sd_addr <= CFG_WCACHE_FFN_BASE + {wca_layer + 3'd1, 16'd0};
                             wc_state <= WC_REF_CHK;
                         end
                     end else begin
@@ -326,19 +332,17 @@ module top #(
         end
     end
     // Decodeur + mappeur (lecture, cote FSM FQ). Hits actifs seulement apres fill.
-    wire [3:0]  ff_layer    = sd_addr[20:16] - 4'd1;       // 0..4 pour layers 0..4
-    wire        ff_layer_ok = (sd_addr[20:16] >= 4'd1) && (sd_addr[20:16] <= 4'd5);
-    wire        ff_off_ok   = (sd_addr[15:0] >= 16'h3200) && (sd_addr[15:0] < 16'hC200);
-`ifdef WCACHE_OFF
-    wire        is_ffn_addr = 1'b0;              // cache desactive (debug : path miss = etape 2a)
-`else
+    wire [3:0]  ff_layer    = sd_addr[20:16] - 4'd1;       // 0..NL-1 pour layers 0..NL-1
+    wire        ff_layer_ok = (sd_addr[20:16] >= 4'd1) && (sd_addr[20:16] <= CFG_NC);
+    wire        ff_off_ok   = (sd_addr[15:0] >= CFG_FFN_LO) && (sd_addr[15:0] < CFG_FFN_HI);
+    // NC=0 -> ff_layer_ok toujours faux (borne <= 0, et >= 1 requis) -> is_ffn_addr=0
+    // -> stream pur. Un seul mécanisme (remplace l'ancien ifdef WCACHE_OFF).
     wire        is_ffn_addr = ff_layer_ok && ff_off_ok && wcache_fill_done_r;
-`endif
-    // cache_addr = ff_layer*36864 + (sd_addr[15:0]-0x3200) ; 36864=0x9000=2^15+2^12
-    // (shift-add dans yosys, pas de DSP). Max = 4*36864+36863 = 184319 < 2^18.
-    wire [17:0] cache_addr  = (ff_layer * 18'd36864) + (sd_addr[15:0] - 16'h3200);
+    // cache_addr = ff_layer*CFG_WCACHE_LAYER_SZ + (sd_addr[15:0]-CFG_OFF_W1).
+    // Max = (NC-1)*WCACHE_LAYER_SZ + (WCACHE_LAYER_SZ-1) = NC*WCACHE_LAYER_SZ-1 < 2^CFG_AW.
+    wire [CFG_AW-1:0] cache_addr  = (ff_layer * CFG_WCACHE_LAYER_SZ) + (sd_addr[15:0] - CFG_OFF_W1);
     wire [7:0]  wcache_dout;
-    wcache_ffn u_wc (.clk(clk_sys),
+    wcache_ffn #(.NFFN(CFG_NFFN), .AW(CFG_AW)) u_wc (.clk(clk_sys),
                      .raddr(cache_addr), .rdata(wcache_dout),
                      .waddr(wc_waddr), .wdata(wc_wdata), .we(wc_we));
     // mux eff_* : priorite booting > wcache_filling > node
@@ -360,7 +364,7 @@ module top #(
     wire [7:0]  eff_din  = booting        ? boot_din    :
                           wcache_filling ? sd_din     :   // wcache ne write pas (peu importe)
                           kv_firing      ? kv_din     : sd_din;
-    wire        eff_ref  = booting        ? boot_ref    :
+    assign      eff_ref  = booting        ? boot_ref    :
                           wcache_filling ? wca_refresh :
                           kv_refresh     ? 1'b1        : sd_refresh;
 `else
@@ -452,6 +456,25 @@ module top #(
         if (out_we_op) obuf[out_waddr_op[5:0]] <= out_wdata_op;
         obuf_rdata_reg <= obuf[obuf_raddr[5:0]];
     end
+
+`ifdef SIM
+    // Sim-only : initialise les BSRAM xbuf/wbuf/obuf à 0 pour matcher l'init
+    // matérielle ECP5 (BRAM default 0). Icarus laisse les `reg [...] mem [...]` à X ;
+    // or le dot FQ lit xbuf[addr] via un read registeré 1-cycle : au 1er cycle du
+    // dot l'addr est encore "stale" (x_raddr_fm non encore propagé), donc le read
+    // tombe sur une case pas (re)écrite ce cycle -> X en sim, 0 en silicium. X
+    // -> mac18 load=X -> acc=X -> Q=X -> token=0 (cf flash-boot-mock-sim). Les FF
+    // x_raddr_fm/w_raddr_fm sont aussi reset à 0 ci-dessous (init matérielle FF 0).
+    integer sim_bsr_i;
+    initial begin
+        for (sim_bsr_i = 0; sim_bsr_i < BSRAM_SZ; sim_bsr_i = sim_bsr_i + 1) begin
+            xbuf[sim_bsr_i] = 8'sd0;
+            wbuf[sim_bsr_i] = 8'sd0;
+        end
+        for (sim_bsr_i = 0; sim_bsr_i < D; sim_bsr_i = sim_bsr_i + 1)
+            obuf[sim_bsr_i] = 8'sd0;
+    end
+`endif
 
     // ---- Select operateur actif (4-bit pour faire de la place a CN) ----
     reg [3:0] op_sel;
@@ -1156,6 +1179,15 @@ module top #(
     reg signed [31:0] dot_acc;
     // Stockage int32 pour requantize (FQ uniquement, N <= 64)
     (* ram_style = "registers" *) reg signed [31:0] y_int32 [0:63];
+`ifdef SIM
+    // Sim-only : y_int32 (reg array) non init -> X en icarus ; écrit par S_FM_STORE
+    // avant lecture, mais si un matmul upstream produit X (cascade attention), y_int32
+    // =X -> requant X -> Q X. Init 0 = default ECP5 (cf flash-boot-mock-sim).
+    integer sim_yi;
+    initial begin
+        for (sim_yi = 0; sim_yi < 64; sim_yi = sim_yi + 1) y_int32[sim_yi] = 32'sd0;
+    end
+`endif
     reg [31:0] max_abs;
     reg [5:0]  fq_lead_bit;
     reg [5:0]  fq_shift_out;
@@ -1313,6 +1345,12 @@ module top #(
             ee_obuf_we <= 1'b0;
             gg_accumulate   <= 1'b0;
             gg_skip_requant <= 1'b0;
+`ifdef SIM
+            // Init matérielle FF 0 (ECP5 default) -- icarus laisse X sinon. Ces addr
+            // sont lues par le dot FQ avant d'être (re)écrites -> stale read X sinon.
+            x_raddr_fm <= 10'd0;
+            w_raddr_fm <= 10'd0;
+`endif
         end else begin
             tx_send    <= 1'b0;
             xbuf_we    <= 1'b0;
@@ -1757,6 +1795,10 @@ module top #(
                 S_FM_SW: if (rx_pending) begin rms_shift_w <= $signed(rx_byte); rx_idx <= 10'd0; state <= S_FM_RX_X; end
                 S_FM_RX_X: if (rx_pending) begin
                     xbuf_waddr <= rx_idx; xbuf_wdata <= $signed(rx_byte); xbuf_we <= 1'b1;
+`ifdef SIM_DEBUG
+                    if (rx_idx <= 10'd2 || rx_idx == 10'd63)
+                        $display("[SIM] FM_RX_X idx=%0d byte=%0d", rx_idx, $signed(rx_byte));
+`endif
                     if (rx_idx == 10'd63) begin rx_idx <= 10'd0; state <= S_FM_A0; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
@@ -1837,6 +1879,13 @@ module top #(
                     // fm_xs16 = xbuf[dot_k] (addr set previous cycle), fed to mac18 this cycle
                     x_raddr_fm <= {3'd0, dot_k + 7'd1};   // prefetch k+1 for next cycle
                     w_raddr_fm <= {3'd0, dot_k + 7'd1};
+`ifdef SIM_DEBUG
+                    if (dot_k == 7'd0)
+                        $display("[SIM] FQ k0 row=%0d N=%0d xa=%0d wa=%0d x0=%0d w0=%0d xr=%0d wr=%0d",
+                                 fm_row, fm_N, x_raddr_fm, w_raddr_fm,
+                                 $signed(xbuf[0]), $signed(wbuf[0]),
+                                 $signed(x_rdata_reg), $signed(w_rdata_reg));
+`endif
                     if (dot_k == 7'd63) begin
                         state <= S_FM_DOT_DRAIN;          // 64th issue done, mac_ce drops next cyc
                     end else begin

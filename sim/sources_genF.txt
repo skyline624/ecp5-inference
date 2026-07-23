@@ -1,0 +1,15 @@
+models/ECP5_PLL_sim.v
+models/MULTALU18X18.v
+models/sdram_chip.v
+../src/node_top.v
+../src/wcache_ffn.v
+../src/sdram.v
+../src/mac18.v
+../src/rmsnorm_op.v
+../src/silu_op.v
+../src/rope_op.v
+../src/softmax_op.v
+../src/attention_head_op.v
+../src/async_fifo.v
+../src/gen_seq.v
+../src/gen_seq_top.v

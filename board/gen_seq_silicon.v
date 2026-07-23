@@ -51,6 +51,11 @@ module gen_seq_silicon #(
     ,output wire       flash_cs_n
 `endif
 );
+    `include "model_cfg.vh"
+    // gen_seq shape from model_cfg.vh (source unique) : HID/LSTRIDE/OFF_*/LBASE.
+    // D/NL/NPOS/NPR restent des parameter (defaults dim 64 = CFG_). Pour dim 128+ :
+    // surcharger ces parameter ET éditer model_cfg.vh ensemble (TODO unification).
+
     // ---- Power-on reset (raw clk domain; the node has its own internal POR) ----
     // Counter saturates at 0xFFFF so rst_n = por[15] rises once and STAYS high.
     // A free-running 16-bit counter would wrap every 65536 cycles (~2.6 ms @ 25 MHz)
@@ -159,7 +164,9 @@ module gen_seq_silicon #(
     wire [22:0] n_kv_addr;  wire n_kv_rd, n_kv_wr;  wire [7:0] n_kv_din;
     wire        n_kv_refresh; wire [7:0] n_sd_dout;  wire n_sd_busy;
 
-    gen_seq #(.W(W), .D(D), .NL(NL), .NPOS(NPOS), .NPR(NPR)) u_seq (
+    gen_seq #(.W(W), .D(D), .NL(NL), .NPOS(NPOS), .NPR(NPR),
+              .HID(CFG_HID), .LSTRIDE(CFG_LSTRIDE), .LBASE(CFG_LBASE),
+              .OFF_W1(CFG_OFF_W1), .OFF_W3(CFG_OFF_W3), .OFF_W2(CFG_OFF_W2)) u_seq (
         .clk(clk), .rst_n(rst_n & seq_rst_n), .start(start_pulse), .gen_mode(1'b1),
         .x_in({W*D{1'b0}}), .sx_in(8'sd0),
         .sw_rms(sw_rms), .swq(swq), .swk(swk), .swv(swv), .swo(swo),

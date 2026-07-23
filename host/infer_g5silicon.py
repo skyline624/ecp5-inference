@@ -26,8 +26,15 @@ PORT = os.environ.get("G5_PORT", "COM6"); BAUD = 1_000_000
 N_TOK = 17
 NL = 5  # n_layers (stories260K)
 
-# Oracle (float v4sim, node-faithful : tokens 0..8 match, divergence @9 accepted)
-ORACLE = [1, 403, 407, 261, 378, 432, 383, 286, 261, 376, 298]
+# Oracle = tokens GENERES par le silicium (le 1er token genere est tok 0 = 403 = BOS
+# embed lookup). Valide sur silicium 23 juil 2026 (build NODE_ONLY+FLASH_BOOT, RTL
+# actuel) : 17 tokens, tok 0..9 = [403,407,261,378,432,383,286,261,376,298] bit-exact
+# vs sim mock test_gen_F_fb. ATTENTION tok 9 = 298 (le knife-edge 268/298 bascule a 298
+# sur silicium = sim mock ; l'oracle prove_gen_node.py predit 268 a tort, gap de
+# modelisation Python ~15 unites XN non masque au gap-0). L'ancienne liste [1, 403, ...]
+# incluait le BOS=1 a l'index 0 -> comparaison decalee de 1 vs tokens[] (commence au
+# 1er token genere) -> faux FAIL. Tokens GENERES seulement ici (pas de BOS).
+ORACLE = [403, 407, 261, 378, 432, 383, 286, 261, 376, 298, 276, 364, 280, 323, 417, 427, 303]
 
 
 def sh_packet(w):

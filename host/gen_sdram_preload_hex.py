@@ -30,7 +30,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DUMP = os.path.join(HERE, "gen_model_dump.json")
 OUT_HEX = os.path.join(HERE, "..", "sim", "sdram_preload.hex")
 
-D, H, KH, HS, HID, NL, VOCAB = 64, 8, 4, 8, 172, 5, 512
+# Shape lue depuis le dump (m['cfg'], lui-même issu du header modèle llama2.c) ->
+# plus de magic numbers hardcodés. Les offsets OFF/LBASE/LSTRIDE restent fixés pour
+# le layout dim 64 (généralisation à dim 128+ = TODO, voir model_cfg.vh).
 LBASE, LSTRIDE = 0x010000, 0x010000
 A_RMSFINAL, A_EMB = 0x060000, 0x000000
 OFF = dict(rms_att=0x0000, wq=0x0100, wk=0x1100, wv=0x1900, wo=0x2100,
@@ -62,9 +64,21 @@ def emit_region(lines, byte_addr, vals):
 def main():
     with open(DUMP) as f:
         m = json.load(f)
+    cfg = m['cfg']
+    D   = cfg['dim']
+    HID = cfg['hidden_dim']
+    NL  = cfg['n_layers']
+    H   = cfg['n_heads']
+    KH  = cfg['n_kv_heads']
+    HS  = cfg['head_size']
+    VOCAB = cfg['vocab_size']
+    # FFN chunking : HID padded au multiple de D supérieur, chunké en blocs [D,D]
+    # (identique au RTL gen_seq.v / model_cfg.vh : 172 -> 192 = 3 chunks).
+    HIDPAD = ((HID + D - 1) // D) * D
+    NCHUNK = HIDPAD // D
 
     lines = []
-    # Embedding table @ 0x000000 (row-major [512,64])
+    # Embedding table @ 0x000000 (row-major [VOCAB,D])
     emit_region(lines, A_EMB, rows(m['tok_emb'], 0, VOCAB, D))
 
     for l in range(NL):
@@ -76,16 +90,16 @@ def main():
         emit_region(lines, base_l + OFF['wv'], rows(w['wv'], 0, KH*HS, D))
         emit_region(lines, base_l + OFF['wo'], rows(w['wo'], 0, D, H*HS))
         emit_region(lines, base_l + OFF['rms_ffn'], w['rms_ffn'])
-        # w1/w3 : 172 lignes pad à 192 (zéro) -> 3 chunks de 64
-        w1 = w['w1'] + [[0]*D for _ in range(192 - HID)]
-        w3 = w['w3'] + [[0]*D for _ in range(192 - HID)]
-        emit_region(lines, base_l + OFF['w1'], rows(w1, 0, 192, D))
-        emit_region(lines, base_l + OFF['w3'], rows(w3, 0, 192, D))
-        # w2 [64,172] : 3 blocs de 64 colonnes, chaque bloc [64,64] (zéro au-delà de 172)
-        for c in range(3):
-            blk = [[(w['w2'][r][c*64+k] if c*64+k < HID else 0) for k in range(D)]
+        # w1/w3 : HID lignes pad à HIDPAD (zéro) -> NCHUNK chunks de D
+        w1 = w['w1'] + [[0]*D for _ in range(HIDPAD - HID)]
+        w3 = w['w3'] + [[0]*D for _ in range(HIDPAD - HID)]
+        emit_region(lines, base_l + OFF['w1'], rows(w1, 0, HIDPAD, D))
+        emit_region(lines, base_l + OFF['w3'], rows(w3, 0, HIDPAD, D))
+        # w2 [D,HID] : NCHUNK blocs de D colonnes, chaque bloc [D,D] (zéro au-delà de HID)
+        for c in range(NCHUNK):
+            blk = [[(w['w2'][r][c*D+k] if c*D+k < HID else 0) for k in range(D)]
                    for r in range(D)]
-            emit_region(lines, base_l + OFF['w2'] + c*0x1000, rows(blk, 0, D, D))
+            emit_region(lines, base_l + OFF['w2'] + c*D*D, rows(blk, 0, D, D))
 
     # rms_final @ 0x060000
     emit_region(lines, A_RMSFINAL, m['rms_final'])

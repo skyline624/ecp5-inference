@@ -50,9 +50,9 @@ if ($Defines -ne "") {
     $DefFlags = (($Defines -split ",") | ForEach-Object { "-D$_" }) -join " "
 }
 
-$readCmd = "read_verilog $DefFlags ../board/$Top.v"
+$readCmd = "read_verilog $DefFlags -I../src -I../board ../board/$Top.v"
 if ($Extra -ne "") {
-    foreach ($f in ($Extra -split ",")) { $readCmd += "; read_verilog $DefFlags $f" }
+    foreach ($f in ($Extra -split ",")) { $readCmd += "; read_verilog $DefFlags -I../src -I../board $f" }
 }
 
 Write-Host "==> yosys synth ($Top)" -ForegroundColor Cyan

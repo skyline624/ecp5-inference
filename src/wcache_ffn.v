@@ -16,16 +16,17 @@
 // lecture 1-cycle registered (FSM FQ S_FM_RD->S_FM_WB). Sur clk_sys.
 
 module wcache_ffn #(
-    parameter NFFN = 184320         // 5 * 3 * 12288
+    parameter NFFN = 184320,        // taille BRAM (NC_LAYERS_CACHED * WCACHE_LAYER_SZ)
+    parameter AW = 18               // largeur ports addr (>= $clog2(NFFN+1))
 ) (
-    input  wire        clk,
+    input  wire          clk,
     // port ecriture (boot DMA, 1 octet/cycle)
-    input  wire [17:0] waddr,       // 0..NFFN-1
-    input  wire [7:0]  wdata,
-    input  wire        we,
+    input  wire [AW-1:0] waddr,     // 0..NFFN-1
+    input  wire [7:0]    wdata,
+    input  wire          we,
     // port lecture (FSM FQ, 1-cycle registered)
-    input  wire [17:0] raddr,       // 0..NFFN-1
-    output wire [7:0]  rdata
+    input  wire [AW-1:0] raddr,     // 0..NFFN-1
+    output wire [7:0]   rdata
 );
     (* ram_style = "block" *) reg [7:0] mem [0:NFFN-1];
 

@@ -29,20 +29,22 @@ module gen_seq #(
     parameter W = 8,
     parameter D = 64,
     parameter H = 8, parameter KH = 4, parameter HS = 8,
+    parameter HID = 172,                 // FFN hidden_dim (chunké en NCHUNK_F blocs [D,D])
     parameter TMAX = 32,
     parameter BOOT = 40000,
     parameter NL   = 5,                   // number of transformer layers
-    parameter LBASE = 23'h010000,         // layer 0 weight base (base_l = LBASE + layer*0x10000)
-    // per-layer weight offsets (stories260K SDRAM layout)
+    parameter LBASE = 23'h010000,         // layer 0 weight base (base_l = LBASE + layer*LSTRIDE)
+    parameter LSTRIDE = 23'h010000,       // per-layer SDRAM stride (>= taille couche, pow2)
+    // per-layer weight offsets (stories260K SDRAM layout ; dériver pour dim 128+ = TODO)
     parameter OFF_RMS   = 23'h000000,
     parameter OFF_WQ    = 23'h000100,
     parameter OFF_WK    = 23'h001100,
     parameter OFF_WV    = 23'h001900,
     parameter OFF_WO    = 23'h002100,
     parameter OFF_RMSFF = 23'h003100,
-    parameter OFF_W1    = 23'h003200,     // W1 [HID,64], chunk c @ +c*0x1000
-    parameter OFF_W3    = 23'h006200,     // W3 [HID,64], chunk c @ +c*0x1000
-    parameter OFF_W2    = 23'h009200,     // W2 chunk c = [64,64] @ +c*0x1000
+    parameter OFF_W1    = 23'h003200,     // W1 [HIDPAD,D], chunk c @ +c*(D*D)
+    parameter OFF_W3    = 23'h006200,     // W3 [HIDPAD,D], chunk c @ +c*(D*D)
+    parameter OFF_W2    = 23'h009200,     // W2 chunk c = [D,D] @ +c*(D*D)
     // lm_head (after the 5 layers) : fixed addresses, not per-layer
     parameter VOCAB  = 512,
     parameter NCHUNK = 8,                 // VOCAB/64
@@ -95,6 +97,10 @@ module gen_seq #(
     localparam KVW  = KH*HS;              // 32
     localparam NREP = H/KH;
     localparam NSLOTS = 8;
+    // FFN chunking : HID padded au multiple de D supérieur, chunké en NCHUNK_F blocs [D,D]
+    // (172 -> 192 = 3 chunks pour dim 64). Cohérent avec model_cfg.vh / node_top.wcache.
+    localparam HIDPAD  = ((HID+D-1)/D)*D;
+    localparam NCHUNK_F= HIDPAD/D;        // 3 pour stories260K
     localparam SW = 3;
     localparam AW = SW + 6;
     // Session 6b lever #2 (vfile fusion SB_P->SB_Vc, 8->7 slots) was tried and REVERTED :
@@ -161,14 +167,14 @@ module gen_seq #(
     reg signed [7:0] sx0, sxn, sQ, sK, sV, sA, sOut;
     // FFN running/per-chunk shifts + chunk counter
     reg signed [7:0] sxb, s1c, s3c, ssgc, shc, spc, sov;
-    reg [1:0] fc;                            // ffn hidden chunk 0..2 (64+64+44)
+    reg [2:0] fc;                            // ffn hidden chunk 0..NCHUNK_F-1 (D-wide each)
     reg in_ffn;                              // 0 while attention, 1 during FFN
     reg [22:0] waddr;                        // blocking temp : chunked weight address
-    // FFN hidden dim HID=172 is chunked 3x64 with W1/W3 rows 172..191 zero-padded
-    // (test preload) so every chunk is a clean 64-wide op : silu(0)=0, no stale
-    // value contaminates the per-chunk output shift, and W2 cols 172..191 are 0.
+    // FFN hidden dim HID is chunked NCHUNK_F blocks of D with W1/W3 rows HID..HIDPAD-1
+    // zero-padded (test preload) so every chunk is a clean D-wide op : silu(0)=0, no
+    // stale value contaminates the per-chunk output shift, and W2 cols HID..HIDPAD-1 are 0.
     reg [2:0] layer;                         // current transformer layer 0..NL-1
-    wire [22:0] base_l = base + LBASE + {layer,16'b0};   // = base + LBASE + layer*0x10000
+    wire [22:0] base_l = base + LBASE + layer*LSTRIDE;   // = base + LBASE + layer*LSTRIDE
     reg [9:0] cur_tok;                       // current token fed to EMBED (gen mode)
     reg [5:0] pos_reg;                       // effective position (internal counter in gen mode)
     // prefill : prompt_len tokens ingérés sans émission (embed+KVWR), puis émission au
@@ -279,6 +285,24 @@ module gen_seq #(
 
     integer j;
 
+`ifdef SIM
+    // Sim-only : initialise les mémoires interne (vfile/ksh/vsh/logits/csh) a 0 pour
+    // matcher l'init matérielle ECP5 (BRAM/LUTRAM default 0). Icarus laisse les
+    // `reg [...] mem [...]` a X ; or certaines cases sont lues avant d'être écrites
+    // dans la cascade attention->residual->rmsnorm_ffn (cf flash-boot-mock-sim :
+    // x0=x a W1, XN=x final -> lm_head logits=X -> token 0). En silicium ces cases
+    // default a 0 (ECP5), donc la cascade est stable ; l'init 0 sim reproduit ça.
+    integer sim_gi;
+    initial begin
+        for (sim_gi = 0; sim_gi < NSLOTS*D; sim_gi = sim_gi + 1) vfile[sim_gi] = 8'd0;
+        for (sim_gi = 0; sim_gi < NL*TMAX; sim_gi = sim_gi + 1) begin
+            ksh[sim_gi] = 8'sd0; vsh[sim_gi] = 8'sd0;
+        end
+        for (sim_gi = 0; sim_gi < VOCAB; sim_gi = sim_gi + 1) logits[sim_gi] = 8'sd0;
+        for (sim_gi = 0; sim_gi < NCHUNK; sim_gi = sim_gi + 1) csh[sim_gi] = 8'sd0;
+    end
+`endif
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st<=IDLE; done<=0; tx_send<=0; idx<=0; rcnt<=0; bcnt<=0; phase<=PH_FN;
@@ -348,12 +372,12 @@ module gen_seq #(
                             pkt[68]<=a0(base_l+OFF_RMSFF);pkt[69]<=a1(base_l+OFF_RMSFF);pkt[70]<=a2(base_l+OFF_RMSFF);
                             pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0]; end
                         PH_FW1: begin  // W1_chunk(XN) -> H1 (SB_Q), N_out=64 (zero-padded)
-                            waddr = base_l + OFF_W1 + {fc,12'b0};
+                            waddr = base_l + OFF_W1 + fc*(D*D);
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw1_l;
                             pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; dst_slot<=SB_Q; Nfq<=D[7:0]; end
                         PH_FW3: begin  // W3_chunk(XN) -> H3 (SB_Kc)
-                            waddr = base_l + OFF_W3 + {fc,12'b0};
+                            waddr = base_l + OFF_W3 + fc*(D*D);
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw3_l;
                             pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; dst_slot<=SB_Kc; Nfq<=D[7:0]; end
@@ -366,7 +390,7 @@ module gen_seq #(
                             pkt[68]<=a0(A_RMSFINAL+base);pkt[69]<=a1(A_RMSFINAL+base);pkt[70]<=a2(A_RMSFINAL+base);
                             pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0]; end
                         PH_LM: begin   // FQ(XN, tok_emb chunk lmchunk) -> logits chunk
-                            waddr = A_EMB + base + {lmchunk,12'b0};
+                            waddr = A_EMB + base + lmchunk*(D*D);
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw_emb;
                             pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; Nfq<=D[7:0]; end
@@ -374,7 +398,7 @@ module gen_seq #(
                             pkt[0]<="E";pkt[1]<="E";pkt[2]<=cur_tok[7:0];pkt[3]<={6'd0,cur_tok[9:8]};
                             pkt_len<=4; resp_len<=66; src_slot<=SB_XB; dst_slot<=SB_XB; Nfq<=D[7:0]; end
                         default: begin // PH_FW2 : W2_chunk(HG) -> P (SB_P), N_out=64
-                            waddr = base_l + OFF_W2 + {fc,12'b0};
+                            waddr = base_l + OFF_W2 + fc*(D*D);
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=shc;pkt[4]<=sw2_l;
                             pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_P; Nfq<=D[7:0]; end
@@ -433,6 +457,11 @@ module gen_seq #(
                 E_MDONE: if (!kv_busy) begin
                     if (!mmv) kraw <= $signed(kv_dout);
                     else      vraw <= $signed(kv_dout);
+`ifdef SIM_DEBUG
+                    if (mmo==3'd0)
+                        $display("[SIM] E_MDONE mmv=%0d mmp=%0d mmo0 kv_dout=%0d",
+                                 mmv, mmp, $signed(kv_dout));
+`endif
                     st <= E_MMRD;
                 end
                 // KV cache byte : kraw/vraw now hold the SDRAM byte at the current
@@ -458,6 +487,11 @@ module gen_seq #(
 
                 // stream response; write vector bytes into dst_slot
                 RECV: if (rx_valid) begin
+`ifdef SIM_DEBUG
+                    if (rcnt==2 || rcnt==3)
+                        $display("[SIM] RECV phase=%0d lmchunk=%0d rcnt=%0d rx_data=%0d",
+                                 phase, lmchunk, rcnt, $signed(rx_data));
+`endif
                     if ((phase==PH_FN||phase==PH_FN2||phase==PH_FNF) && rcnt>=11 && rcnt<11+D)
                                                                   begin vaddr<=vidx(SB_XN, rcnt[5:0]-11); vdin<=rx_data; vwe<=1'b1; end
                     else if ((phase==PH_WQ||phase==PH_WK||phase==PH_WV||phase==PH_WO||
@@ -594,6 +628,12 @@ module gen_seq #(
                         kv_addr <= KV_BASE + ((layer*TMAX + pos_reg) << 6) + ldi[5:0];
                         kv_din  <= vfile[vidx(SB_Kc, ldi[5:0])];
                         kv_wr   <= 1'b1;
+`ifdef SIM_DEBUG
+                        if (ldi[5:0]==6'd0)
+                            $display("[SIM] KVWR K ldi0 vKc0=%0d vQ0=%0d pos=%0d",
+                                     $signed(vfile[vidx(SB_Kc,6'd0)]),
+                                     $signed(vfile[vidx(SB_Q,6'd0)]), pos_reg);
+`endif
                         st      <= KVWR_KB;
                     end
                 end
@@ -656,7 +696,7 @@ module gen_seq #(
                         if (ldi==D-1) begin ldi<=0;
                             case (alu_next)
                                 2'd0: begin phase<=PH_FW2; st<=BUILD; end               // MUL done -> W2
-                                2'd1: if (fc==2'd2) begin                               // last reduce -> FFN residual
+                                2'd1: if (fc==NCHUNK_F-1) begin                        // last reduce -> FFN residual
                                           alu_aslot<=SB_XB; alu_bslot<=SB_OUTV; alu_dslot<=SB_XB;
                                           alu_op<=1'b1; alu_sa<=sxb; alu_sb<=sov; alu_next<=2'd2;
                                           ldi<=0; st<=ALD_A;
@@ -710,6 +750,26 @@ module gen_seq #(
                             end else begin
                                 // dernier token du prompt (prefill_left vient d'atteindre 0)
                                 // OU decode normal : émission + feed argmax (comportement actuel).
+`ifdef SIM_DEBUG
+                                // dump argmax state + XB/XN/logits samples to localize the
+                                // zero-token bug (logits all X/0 -> upstream XN/embed/SDRAM).
+                                $display("[SIM] emit tok=%0d pos=%0d best_val=%0d best_idx=%0d sref_lm=%0d csh=%0d %0d %0d %0d",
+                                         best_idx, pos_reg, best_val, best_idx, sref_lm,
+                                         $signed(csh[0]), $signed(csh[1]), $signed(csh[2]), $signed(csh[3]));
+                                $display("[SIM] XB[0:7]=%0d %0d %0d %0d %0d %0d %0d %0d",
+                                         $signed(vfile[0]),$signed(vfile[1]),$signed(vfile[2]),$signed(vfile[3]),
+                                         $signed(vfile[4]),$signed(vfile[5]),$signed(vfile[6]),$signed(vfile[7]));
+                                $display("[SIM] XN[0:7]=%0d %0d %0d %0d %0d %0d %0d %0d",
+                                         $signed(vfile[64]),$signed(vfile[65]),$signed(vfile[66]),$signed(vfile[67]),
+                                         $signed(vfile[68]),$signed(vfile[69]),$signed(vfile[70]),$signed(vfile[71]));
+                                $display("[SIM] logits[0:7]=%0d %0d %0d %0d %0d %0d %0d %0d",
+                                         $signed(logits[0]),$signed(logits[1]),$signed(logits[2]),$signed(logits[3]),
+                                         $signed(logits[4]),$signed(logits[5]),$signed(logits[6]),$signed(logits[7]));
+                                $display("[SIM] logits[400:410]=%0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d",
+                                         $signed(logits[400]),$signed(logits[401]),$signed(logits[402]),$signed(logits[403]),
+                                         $signed(logits[404]),$signed(logits[405]),$signed(logits[406]),$signed(logits[407]),
+                                         $signed(logits[408]),$signed(logits[409]),$signed(logits[410]));
+`endif
                                 token_valid <= 1'b1; cur_tok <= best_idx;   // emit + feed next EMBED
                                 if (pos_reg == NPOS-1) begin done<=1; st<=IDLE; end   // last token
                                 else begin  // next token : embed again, KV cache persists

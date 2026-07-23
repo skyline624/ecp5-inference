@@ -21,7 +21,15 @@ $(HEX_FILES): %: $(LUT)/%
 	cp -f $< .
 hex: $(HEX_FILES)
 
-VERILOG_SOURCES += $(abspath models/Gowin_rPLL.v)
+# node_top.v = module `top` ss-link+KV (path silicium, sim-compatible via mocks).
+# L'ancien src/top.v UART-direct n'a PAS les ports lk_rx/tx+kv_* que gen_seq_top.v
+# connecte -> sim cassée depuis l'étape 1 KV SDRAM. On pointe sur node_top.v
+# (mêmes ports ss-link+KV), cache controller inactif sans FLASH_BOOT (reads FFN ->
+# fallback SDRAM = path sim historique, bit-exact vs SDRAM_PRELOAD). Voir mémoire
+# sim-top-uart-direct-stale / rtl-dim-parametrable-validated.
+# Gowin_rPLL.v -> ECP5_PLL_sim.v : node_top instancie `ecp5_pll` (mock sim), pas
+# `Gowin_rPLL` (qui était l'ancienne ALU UART-direct top.v).
+VERILOG_SOURCES += $(abspath models/ECP5_PLL_sim.v)
 VERILOG_SOURCES += $(abspath models/MULTALU18X18.v)
 VERILOG_SOURCES += $(abspath models/sdram_chip.v)
 VERILOG_SOURCES += $(RTL)/mac18.v
@@ -34,7 +42,8 @@ VERILOG_SOURCES += $(RTL)/sdram.v
 VERILOG_SOURCES += $(abspath ../src/async_fifo.v)
 VERILOG_SOURCES += $(abspath ../src/uart_bridge.v)
 VERILOG_SOURCES += $(abspath ../src/vec_alu2.v)
-VERILOG_SOURCES += $(RTL)/top.v
+VERILOG_SOURCES += $(RTL)/node_top.v
+VERILOG_SOURCES += $(RTL)/wcache_ffn.v
 VERILOG_SOURCES += $(abspath ../src/gen_seq.v)
 VERILOG_SOURCES += $(abspath ../src/gen_seq_top.v)
 
