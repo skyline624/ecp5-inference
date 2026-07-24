@@ -73,13 +73,35 @@ grossit encore (4-16 Mo). Le cluster distribue poids+KV+compute sur plusieurs pu
   ECP5-45F, même indépendamment de la SDRAM (qui déborde aussi : 13 Mo > 8 Mo).
   → carte custom (FPGA plus gros, ex. ECP5-85F) + SDRAM étendue requise.
 - **dim=512 (tinyllamas)** : LUT mesurée **189 %** + SDRAM 37 Mo → **cluster
-  multi-FPGA obligatoire**. Dimensionnement à partir de la courbe : dim max par
-  nœud = 128 (validé silicium) → NN = ceil(512/128) = **4 nœuds** en tensor-parallel
-  (déjà présent dans le RTL via `CFG_NN`), ou 2 nœuds si une carte custom monte à
-  dim=256.
+  multi-FPGA obligatoire**. **Mais le cluster n'est pas une solution clé en main** :
+  il faut deux reworks architecturaux (cf. ci-dessous), le « tensor-parallel »
+  actuel n'étant qu'un placeholder.
 
-> Le cluster (`CFG_NN>1`, tensor-parallel déjà présent dans le RTL) est
-> dimensionné à partir de cette courbe. C'est l'extension architecturale suivante.
+> **Attention : le cluster, tel qu'implémenté, n'aide PAS pour `dim`.** Deux murs
+> distincts, et le sharding n'est pas câblé :
+> 1. **LUT — le sharding de `D` n'est PAS implémenté.** `CFG_NN=1` est hardcodé
+>    (`model_cfg.vh:101` « première livraison : single-node »). `node_top` utilise
+>    le `D` complet partout (`y_int32[D]`, `alu_a[D*8]`, `xbuf`, dot sur `D`).
+>    `ring_cluster.v` est un **banc de test d'all-gather standalone** (anneau N nœuds,
+>    « N-scalability test »), pas intégré au chemin de calcul. Donc N nœuds i9
+>    feraient **chacun** tourner le datapath dim=512 → **189 % LUT par nœud** →
+>    toujours débordé. Le cluster ajoute de la comm (ss_link) mais **ne splitte pas
+>    le compute**. Pour que la LUT tienne (≈ 87 %/nœud, niveau dim=128), il faut un
+>    **vrai rework tensor-parallel** : sharder `D` (buffers `[D/NN]`, dot sur
+>    `D/NN`, heads réparties) + all-reduce des partiels via l'anneau ss_link.
+>    Non fait — c'est l'extension architecturale suivante.
+> 2. **SDRAM — même avec sharding, NN=4 ne tient pas sur i9.** Poids dim=512 ≈
+>    32-37 Mo. Sharding NN=4 → ~8-9 Mo/nœud, vs SDRAM i9 = 8 Mo → borderline
+>    débordement. Il faut soit NN≥5 (ou NN=8 marge), soit une **carte custom avec
+>    plus de SDRAM** (alors NN=2-4 tient), soit du **weight-streaming** depuis
+>    host/flash (décorrèle `dim` de la SDRAM embarquée — le FFN est déjà streamé
+>    en NC=0 ; étendre aux poids d'attention).
+>
+> **Chemin réel vers dim=512** : (a) rework tensor-parallel (shard `D` + all-reduce
+> ss_link) **ET** (b) grossir la SDRAM ou streamer les poids. Sur i9 stock, dim=512
+> n'est PAS atteignable juste en « ajoutant des nœuds » — les deux murs (LUT par
+> nœud, SDRAM par nœud) demandent du travail architectural au-delà du placeholder
+> actuel. Single-FPGA validé : **dim=128**. dim=256/512 = cluster + rework.
 
 ## Preuve bit-exact par palier (Phase 7c)
 
