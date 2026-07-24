@@ -51,7 +51,8 @@ module gen_seq #(
     parameter A_RMSFINAL = 23'h060000,    // final rmsnorm weight
     parameter A_EMB      = 23'h000000,    // tok_emb (shared classifier), chunk c @ +c*0x1000
     parameter NPOS  = 17,                 // generation length (token loop)
-    parameter NPR   = 16                  // max prompt tokens for prefill (prompt_len=0 -> BOS)
+    parameter NPR   = 16,                 // max prompt tokens for prefill (prompt_len=0 -> BOS)
+    parameter KV_BASE = 23'h070000        // KV cache SDRAM base (surcharge par CFG_KV_BASE)
 ) (
     input  wire            clk, rst_n, start,
     input  wire            gen_mode,      // 0 = single-shot (external x_in), 1 = autonomous generation
@@ -76,6 +77,13 @@ module gen_seq #(
     output reg  [9:0]      token,         // argmax of the lm_head logits (= token_out)
     output reg             token_valid,   // 1-cycle pulse when a token is emitted (gen mode)
     output reg             done,
+`ifdef SIM
+    output [5:0]          dbg_st,          // debug SIM-only : expose le FSM state (localise hang)
+    output [3:0]          dbg_phase,       // debug SIM-only : phase courante (PH_*)
+    output [11:0]         dbg_idx,         // debug SIM-only : idx octet paquet / rcnt recv
+    output [31:0]         dbg_best_v,      // debug SIM-only : argmax best_val final (v du token émis)
+    output [9:0]          dbg_best_i,      // debug SIM-only : argmax best_idx final (= token émis)
+`endif
     // ---- KV cache maître SDRAM direct (étape 1 KV→SDRAM, plan §2.2) ----
     // kmem/vmem (BRAM 10 Ko, 6 DP16KD) déplacés en SDRAM @ KV_BASE. ksh/vsh
     // restent on-chip (re-align 1 cyc). Interface byte, non-burst : pulse rd/wr +
@@ -127,8 +135,8 @@ module gen_seq #(
     // non nécessaire (cf port kv_* + note mémoire) : SDRAM naive 5 cyc/byte reste
     // <0.2% du cycle token car PH_MM est ss_link-bound. Le re-align
     // clip8(kraw >>> (sKref - ksh[...])) reste dans le seq (ksh/vsh on-chip, 1 cyc).
-    localparam [22:0] KV_BASE = 23'h070000;   // après miroir poids 0x000000-0x060040
-    // 10 Ko actuels (NL*TMAX*2*KVW). 7.5 Mo libres -> TMAX>>32 possible.
+    // KV_BASE = paramètre passé par le parent (CFG_KV_BASE = après RMSFINAL).
+    // Layout SDRAM, K/V contigus par position : KV_BASE + (layer*TMAX+pos)*2*KVW + (mmv?KVW:0) + mmo.
     reg signed [7:0] ksh  [0:NL*TMAX-1];      // per-(layer,pos) K shift (re-align)
     reg signed [7:0] vsh  [0:NL*TMAX-1];      // per-(layer,pos) V shift (re-align)
 
@@ -163,7 +171,7 @@ module gen_seq #(
         .a(alu_a), .sa(alu_sa), .b(alu_b), .sb(alu_sb),
         .out(alu_out), .out_sh(alu_out_sh), .done(alu_done));
 
-    reg [7:0] pkt [0:79];
+    reg [7:0] pkt [0:8+D-1];   // rework dim : paquet max = header(5) + D data + addr(3) = 8+D
     reg [11:0] pkt_len, resp_len, idx, rcnt;   // MM packet grows to ~1158B at pos=16
     reg [6:0] ldi;
     reg [23:0] bcnt;
@@ -206,7 +214,7 @@ module gen_seq #(
                      PH_FNF=11, PH_LM=12, PH_EE=13;
     reg [3:0] phase;
     reg [3:0] src_slot, dst_slot;
-    reg [7:0] Nfq;                          // FQ output count for current phase
+    reg [$clog2(D):0] Nfq;                  // FQ output count (tient D/KVW ; [7:0] tronquait D>255)
 
     localparam IDLE=0, LOADX=1, BWAIT=2, BUILD=3, E_SET=4, E_BUSY=5, E_DONE=6, RECV=7,
                ROPEQ=8, ROPEK=9, KVWR=10, SCAN=11, RESID=12, DONE_ST=13,
@@ -223,6 +231,13 @@ module gen_seq #(
                // lui-même un refresh SDRAM (~15µs) aux points de cession E_MREQ/KVWR/V.
                E_MREFRESH=31, E_MREF_BUSY=32, E_MREF_DONE=33, KVWR_V=34;
     reg [5:0] st;              // élargi à 6 bits (35 états > 32)
+`ifdef SIM
+    assign dbg_st = st;        // debug SIM-only : expose le FSM state (localise hang)
+    assign dbg_phase = phase;  // debug SIM-only : phase courante (PH_*)
+    assign dbg_idx = idx;      // debug SIM-only : idx octet paquet (E_SET) / rcnt recv
+    assign dbg_best_v = best_val;  // argmax best_val final (v du token émis)
+    assign dbg_best_i = best_idx;  // argmax best_idx final (= token émis)
+`endif
     reg [1:0] kv_refresh_ret;  // 0 = read (E_MREQ), 1 = write K (KVWR), 2 = write V (KVWR_V)
     // compteur temps bus KV (PH_MM/KVWR) -> refresh auto toutes les ~15µs (375 cyc @25MHz)
     reg [8:0]  kv_refresh_cnt;
@@ -280,13 +295,19 @@ module gen_seq #(
     (* ram_style = "block" *) reg signed [15:0] cos_rom [0:NPOS*(HS/2)-1];
     (* ram_style = "block" *) reg signed [15:0] sin_rom [0:NPOS*(HS/2)-1];
     initial begin
-`ifdef HS16_PROFILE
-        $readmemh("freq_cis_cos_hs16.hex", cos_rom);   // 136 entries (NPOS*HALF, HS=16)
-        $readmemh("freq_cis_sin_hs16.hex", sin_rom);
-`else
-        $readmemh("freq_cis_cos.hex", cos_rom);        // 68 entries (NPOS*HALF, HS=8)
-        $readmemh("freq_cis_sin.hex", sin_rom);
-`endif
+        // ROM RoPE : HS=16 -> fichier _hs16 (NPOS*8=136 entries), HS=8 -> fichier HS=8
+        // (NPOS*4=68). Gardé sur le PARAMÈTRE HS (pas `HS16_PROFILE) : le profile DIM128 a
+        // aussi HS=16 (CFG_HS=16 H=8 KH=2) sans définir HS16_PROFILE -> sans ce fix, dim128
+        // chargeait freq_cis_cos.hex (68) dans un ROM 136-deep -> pos0 paires 4..7 prenaient
+        // les valeurs de pos1 -> RoPE faux -> drift oracle vs RTL (p0 exact par chance,
+        // p1+ divergent ; silicium==sim car les deux chargent le même ROM faux via $readmemh).
+        if (HS == 16) begin
+            $readmemh("freq_cis_cos_hs16.hex", cos_rom);   // 136 entries (NPOS*HALF, HS=16)
+            $readmemh("freq_cis_sin_hs16.hex", sin_rom);
+        end else begin
+            $readmemh("freq_cis_cos.hex", cos_rom);        // 68 entries (NPOS*HALF, HS=8)
+            $readmemh("freq_cis_sin.hex", sin_rom);
+        end
     end
     wire [$clog2(NPOS*(HS/2))-1:0] rope_ridx = pos_reg*(HS/2) + rcp;
     reg signed [15:0] crom, srom;
@@ -343,7 +364,7 @@ module gen_seq #(
                         if (gen_mode) begin phase<=PH_EE; pos_reg<=6'd0; st<=BWAIT; end  // autonomous : embed first
                         else          begin phase<=PH_FN; pos_reg<=pos;   st<=LOADX; end // single-shot : external x
                     end
-                LOADX: begin vaddr<=vidx(SB_XB, ldi[5:0]); vdin<=x_in[ldi*W +: W]; vwe<=1'b1;
+                LOADX: begin vaddr<=vidx(SB_XB, ldi); vdin<=x_in[ldi*W +: W]; vwe<=1'b1;
                         if (ldi==D-1) begin ldi<=0; st<=BWAIT; end else ldi<=ldi+1; end
                 BWAIT: if (bcnt==BOOT) st<=BUILD; else bcnt<=bcnt+1;
 
@@ -351,22 +372,22 @@ module gen_seq #(
                     case (phase)
                         PH_FN: begin
                             pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rms_l;
-                            pkt[68]<=a0(base_l+OFF_RMS);pkt[69]<=a1(base_l+OFF_RMS);pkt[70]<=a2(base_l+OFF_RMS);
-                            pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0];
+                            pkt[4+D]<=a0(base_l+OFF_RMS);pkt[4+D+1]<=a1(base_l+OFF_RMS);pkt[4+D+2]<=a2(base_l+OFF_RMS);
+                            pkt_len<=7+D; resp_len<=11+D; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D;
                         end
                         PH_WQ: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=H*HS;pkt[3]<=sxn;pkt[4]<=swq_l;
-                            pkt[69]<=a0(base_l+OFF_WQ);pkt[70]<=a1(base_l+OFF_WQ);pkt[71]<=a2(base_l+OFF_WQ);
-                            pkt_len<=72; resp_len<=3+H*HS; src_slot<=SB_XN; dst_slot<=SB_Q; Nfq<=H*HS;
+                            pkt[5+D]<=a0(base_l+OFF_WQ);pkt[5+D+1]<=a1(base_l+OFF_WQ);pkt[5+D+2]<=a2(base_l+OFF_WQ);
+                            pkt_len<=8+D; resp_len<=3+H*HS; src_slot<=SB_XN; dst_slot<=SB_Q; Nfq<=H*HS;
                         end
                         PH_WK: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=KH*HS;pkt[3]<=sxn;pkt[4]<=swk_l;
-                            pkt[69]<=a0(base_l+OFF_WK);pkt[70]<=a1(base_l+OFF_WK);pkt[71]<=a2(base_l+OFF_WK);
-                            pkt_len<=72; resp_len<=3+KH*HS; src_slot<=SB_XN; dst_slot<=SB_Kc; Nfq<=KH*HS; end
+                            pkt[5+D]<=a0(base_l+OFF_WK);pkt[5+D+1]<=a1(base_l+OFF_WK);pkt[5+D+2]<=a2(base_l+OFF_WK);
+                            pkt_len<=8+D; resp_len<=3+KH*HS; src_slot<=SB_XN; dst_slot<=SB_Kc; Nfq<=KH*HS; end
                         PH_WV: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=KH*HS;pkt[3]<=sxn;pkt[4]<=swv_l;
-                            pkt[69]<=a0(base_l+OFF_WV);pkt[70]<=a1(base_l+OFF_WV);pkt[71]<=a2(base_l+OFF_WV);
-                            pkt_len<=72; resp_len<=3+KH*HS; src_slot<=SB_XN; dst_slot<=SB_Vc; Nfq<=KH*HS; end
+                            pkt[5+D]<=a0(base_l+OFF_WV);pkt[5+D+1]<=a1(base_l+OFF_WV);pkt[5+D+2]<=a2(base_l+OFF_WV);
+                            pkt_len<=8+D; resp_len<=3+KH*HS; src_slot<=SB_XN; dst_slot<=SB_Vc; Nfq<=KH*HS; end
                         PH_MM: begin
                             pkt[0]<="M";pkt[1]<="M";pkt[2]<=sQ;pkt[3]<=sKref;pkt[4]<=sVref;
                             pkt[5]<=({2'd0,pos_reg}+8'd1);
@@ -375,45 +396,45 @@ module gen_seq #(
                             src_slot<=SB_Q; end
                         PH_WO: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sA;pkt[4]<=swo_l;
-                            pkt[69]<=a0(base_l+OFF_WO);pkt[70]<=a1(base_l+OFF_WO);pkt[71]<=a2(base_l+OFF_WO);
-                            pkt_len<=72; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_OUTV; Nfq<=D[7:0];
+                            pkt[5+D]<=a0(base_l+OFF_WO);pkt[5+D+1]<=a1(base_l+OFF_WO);pkt[5+D+2]<=a2(base_l+OFF_WO);
+                            pkt_len<=8+D; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_OUTV; Nfq<=D;
                         end
                         // ---- FFN ----
                         PH_FN2: begin  // rmsnorm(XB, rms_ffn) -> XN
                             pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rmsf_l;
-                            pkt[68]<=a0(base_l+OFF_RMSFF);pkt[69]<=a1(base_l+OFF_RMSFF);pkt[70]<=a2(base_l+OFF_RMSFF);
-                            pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0]; end
+                            pkt[4+D]<=a0(base_l+OFF_RMSFF);pkt[4+D+1]<=a1(base_l+OFF_RMSFF);pkt[4+D+2]<=a2(base_l+OFF_RMSFF);
+                            pkt_len<=7+D; resp_len<=11+D; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D; end
                         PH_FW1: begin  // W1_chunk(XN) -> H1 (SB_Q), N_out=64 (zero-padded)
                             waddr = base_l + OFF_W1 + fc*(D*D);
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw1_l;
-                            pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
-                            pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; dst_slot<=SB_Q; Nfq<=D[7:0]; end
+                            pkt[5+D]<=a0(waddr);pkt[5+D+1]<=a1(waddr);pkt[5+D+2]<=a2(waddr);
+                            pkt_len<=8+D; resp_len<=3+D; src_slot<=SB_XN; dst_slot<=SB_Q; Nfq<=D; end
                         PH_FW3: begin  // W3_chunk(XN) -> H3 (SB_Kc)
                             waddr = base_l + OFF_W3 + fc*(D*D);
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw3_l;
-                            pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
-                            pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; dst_slot<=SB_Kc; Nfq<=D[7:0]; end
+                            pkt[5+D]<=a0(waddr);pkt[5+D+1]<=a1(waddr);pkt[5+D+2]<=a2(waddr);
+                            pkt_len<=8+D; resp_len<=3+D; src_slot<=SB_XN; dst_slot<=SB_Kc; Nfq<=D; end
                         PH_SS: begin   // silu(H1) -> SG (SB_Vc)
                             pkt[0]<="S";pkt[1]<="S";pkt[2]<=s1c;
-                            pkt_len<=67; resp_len<=70; src_slot<=SB_Q; dst_slot<=SB_Vc; Nfq<=D[7:0]; end
+                            pkt_len<=3+D; resp_len<=6+D; src_slot<=SB_Q; dst_slot<=SB_Vc; Nfq<=D; end
                         // ---- lm_head ----
                         PH_FNF: begin  // final rmsnorm(XB, rms_final) -> XN
                             pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rmsfinal;
-                            pkt[68]<=a0(A_RMSFINAL+base);pkt[69]<=a1(A_RMSFINAL+base);pkt[70]<=a2(A_RMSFINAL+base);
-                            pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0]; end
+                            pkt[4+D]<=a0(A_RMSFINAL+base);pkt[4+D+1]<=a1(A_RMSFINAL+base);pkt[4+D+2]<=a2(A_RMSFINAL+base);
+                            pkt_len<=7+D; resp_len<=11+D; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D; end
                         PH_LM: begin   // FQ(XN, tok_emb chunk lmchunk) -> logits chunk
                             waddr = A_EMB + base + lmchunk*(D*D);
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw_emb;
-                            pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
-                            pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; Nfq<=D[7:0]; end
-                        PH_EE: begin   // embedding lookup : EE(cur_tok) -> XB (resp 'E''K' x[64])
+                            pkt[5+D]<=a0(waddr);pkt[5+D+1]<=a1(waddr);pkt[5+D+2]<=a2(waddr);
+                            pkt_len<=8+D; resp_len<=3+D; src_slot<=SB_XN; Nfq<=D; end
+                        PH_EE: begin   // embedding lookup : EE(cur_tok) -> XB (resp 'E''K' x[D])
                             pkt[0]<="E";pkt[1]<="E";pkt[2]<=cur_tok[7:0];pkt[3]<={6'd0,cur_tok[9:8]};
-                            pkt_len<=4; resp_len<=66; src_slot<=SB_XB; dst_slot<=SB_XB; Nfq<=D[7:0]; end
+                            pkt_len<=4; resp_len<=2+D; src_slot<=SB_XB; dst_slot<=SB_XB; Nfq<=D; end
                         default: begin // PH_FW2 : W2_chunk(HG) -> P (SB_P), N_out=64
                             waddr = base_l + OFF_W2 + fc*(D*D);
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=shc;pkt[4]<=sw2_l;
-                            pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
-                            pkt_len<=72; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_P; Nfq<=D[7:0]; end
+                            pkt[5+D]<=a0(waddr);pkt[5+D+1]<=a1(waddr);pkt[5+D+2]<=a2(waddr);
+                            pkt_len<=8+D; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_P; Nfq<=D; end
                     endcase
                     idx<=0; st<=E_SET;
                 end
@@ -427,12 +448,12 @@ module gen_seq #(
                         st<=E_MREQ;
                     end else begin
                         if ((phase==PH_FN||phase==PH_FN2||phase==PH_FNF) && idx>=4 && idx<4+D)
-                                                                        tx_data<=vfile[vidx(src_slot, idx[5:0]-4)];
+                                                                        tx_data<=vfile[vidx(src_slot, idx-4)];
                         else if ((phase==PH_WQ||phase==PH_WK||phase==PH_WV||phase==PH_WO||
                                   phase==PH_FW1||phase==PH_FW3||phase==PH_FW2||phase==PH_LM) && idx>=5 && idx<5+D)
-                                                                        tx_data<=vfile[vidx(src_slot, idx[5:0]-5)];
-                        else if (phase==PH_SS && idx>=3 && idx<3+D)     tx_data<=vfile[vidx(src_slot, idx[5:0]-3)];
-                        else if (phase==PH_MM && idx>=6 && idx<6+D)     tx_data<=vfile[vidx(SB_Q, idx[5:0]-6)];
+                                                                        tx_data<=vfile[vidx(src_slot, idx-5)];
+                        else if (phase==PH_SS && idx>=3 && idx<3+D)     tx_data<=vfile[vidx(src_slot, idx-3)];
+                        else if (phase==PH_MM && idx>=6 && idx<6+D)     tx_data<=vfile[vidx(SB_Q, idx-6)];
                         else tx_data<=pkt[idx];
                         tx_send<=1; st<=E_BUSY;
                     end
@@ -495,15 +516,15 @@ module gen_seq #(
                 // stream response; write vector bytes into dst_slot
                 RECV: if (rx_valid) begin
                     if ((phase==PH_FN||phase==PH_FN2||phase==PH_FNF) && rcnt>=11 && rcnt<11+D)
-                                                                  begin vaddr<=vidx(SB_XN, rcnt[5:0]-11); vdin<=rx_data; vwe<=1'b1; end
+                                                                  begin vaddr<=vidx(SB_XN, rcnt-11); vdin<=rx_data; vwe<=1'b1; end
                     else if ((phase==PH_WQ||phase==PH_WK||phase==PH_WV||phase==PH_WO||
                               phase==PH_FW1||phase==PH_FW3||phase==PH_FW2) && rcnt>=3 && rcnt<3+Nfq)
-                                                                  begin vaddr<=vidx(dst_slot, rcnt[5:0]-3); vdin<=rx_data; vwe<=1'b1; end
-                    else if (phase==PH_SS && rcnt>=6 && rcnt<6+D) begin vaddr<=vidx(dst_slot, rcnt[5:0]-6); vdin<=rx_data; vwe<=1'b1; end
-                    else if (phase==PH_MM && rcnt>=3 && rcnt<3+D) begin vaddr<=vidx(SB_ATT, rcnt[5:0]-3); vdin<=rx_data; vwe<=1'b1; end
-                    else if (phase==PH_EE && rcnt>=2 && rcnt<2+D) begin vaddr<=vidx(SB_XB, rcnt[5:0]-2); vdin<=rx_data; vwe<=1'b1; end
+                                                                  begin vaddr<=vidx(dst_slot, rcnt-3); vdin<=rx_data; vwe<=1'b1; end
+                    else if (phase==PH_SS && rcnt>=6 && rcnt<6+D) begin vaddr<=vidx(dst_slot, rcnt-6); vdin<=rx_data; vwe<=1'b1; end
+                    else if (phase==PH_MM && rcnt>=3 && rcnt<3+D) begin vaddr<=vidx(SB_ATT, rcnt-3); vdin<=rx_data; vwe<=1'b1; end
+                    else if (phase==PH_EE && rcnt>=2 && rcnt<2+D) begin vaddr<=vidx(SB_XB, rcnt-2); vdin<=rx_data; vwe<=1'b1; end
                     // lm_head chunk logits go to the separate logits[] array (not vfile)
-                    if (phase==PH_LM && rcnt>=3 && rcnt<3+D) logits[lmchunk*64 + (rcnt-3)] <= $signed(rx_data);
+                    if (phase==PH_LM && rcnt>=3 && rcnt<3+D) logits[lmchunk*D + (rcnt-3)] <= $signed(rx_data);
                     case (phase)
                         PH_FN:  if (rcnt==2) sxn<=$signed(rx_data);
                         PH_WQ:  if (rcnt==2) sQ<=$signed(rx_data);
@@ -627,8 +648,8 @@ module gen_seq #(
                         kv_refresh_ret <= 2'd1;     // retour KVWR (phase K) après refresh
                         st <= E_MREFRESH;
                     end else begin
-                        kv_addr <= KV_BASE + ((layer*TMAX + pos_reg) << KVW_SH) + ldi[5:0];
-                        kv_din  <= vfile[vidx(SB_Kc, ldi[5:0])];
+                        kv_addr <= KV_BASE + ((layer*TMAX + pos_reg) << KVW_SH) + ldi;
+                        kv_din  <= vfile[vidx(SB_Kc, ldi)];
                         kv_wr   <= 1'b1;
                         st      <= KVWR_KB;
                     end
@@ -643,8 +664,8 @@ module gen_seq #(
                         kv_refresh_ret <= 2'd2;     // retour KVWR_V (phase V) après refresh
                         st <= E_MREFRESH;
                     end else begin
-                        kv_addr <= KV_BASE + ((layer*TMAX + pos_reg) << KVW_SH) + KVW_LIT + ldi[5:0];
-                        kv_din  <= vfile[vidx(SB_Vc, ldi[5:0])];
+                        kv_addr <= KV_BASE + ((layer*TMAX + pos_reg) << KVW_SH) + KVW_LIT + ldi;
+                        kv_din  <= vfile[vidx(SB_Vc, ldi)];
                         kv_wr   <= 1'b1;
                         st      <= KVWR_VB;
                     end
@@ -668,16 +689,16 @@ module gen_seq #(
 
                 // capture x-after-5-layers into result (for test_gen_D), then lm_head
                 DONE_ST: begin
-                    result[ldi*W +: W] <= vfile[vidx(SB_XB, ldi[5:0])];
+                    result[ldi*W +: W] <= vfile[vidx(SB_XB, ldi)];
                     if (ldi==D-1) begin result_sh<=sxb; ldi<=0; phase<=PH_FNF; st<=BUILD; end
                     else ldi<=ldi+1;
                 end
 
                 // ---- serialized ALU sequence (MUL for SwiGLU, ADD for W2 reduce) ----
                 // load alu_a (D bytes, combinational vfile read), then alu_b, pulse start.
-                ALD_A: begin alu_a[ldi*W +: W] <= vfile[vidx(alu_aslot, ldi[5:0])];
+                ALD_A: begin alu_a[ldi*W +: W] <= vfile[vidx(alu_aslot, ldi)];
                         if (ldi==D-1) begin ldi<=0; st<=ALD_B; end else ldi<=ldi+1; end
-                ALD_B: begin alu_b[ldi*W +: W] <= vfile[vidx(alu_bslot, ldi[5:0])];
+                ALD_B: begin alu_b[ldi*W +: W] <= vfile[vidx(alu_bslot, ldi)];
                         if (ldi==D-1) begin ldi<=0; alu_start<=1'b1; st<=ALU_WAIT; end else ldi<=ldi+1; end
                 ALU_WAIT: if (alu_done) begin
                         case (alu_next)
@@ -688,7 +709,7 @@ module gen_seq #(
                         ldi<=0; st<=AST_A;
                     end
                 // serial-store alu_out into alu_dslot, then dispatch by alu_next
-                AST_A: begin vaddr<=vidx(alu_dslot, ldi[5:0]); vdin<=alu_out[ldi*W +: W]; vwe<=1'b1;
+                AST_A: begin vaddr<=vidx(alu_dslot, ldi); vdin<=alu_out[ldi*W +: W]; vwe<=1'b1;
                         if (ldi==D-1) begin ldi<=0;
                             case (alu_next)
                                 2'd0: begin phase<=PH_FW2; st<=BUILD; end               // MUL done -> W2
@@ -708,7 +729,7 @@ module gen_seq #(
                             endcase
                         end else ldi<=ldi+1; end
                 // fc==0 : the first W2 partial simply seeds the accumulator (no add)
-                FRED_COPY: begin vaddr<=vidx(SB_OUTV, ldi[5:0]); vdin<=vfile[vidx(SB_P, ldi[5:0])]; vwe<=1'b1;
+                FRED_COPY: begin vaddr<=vidx(SB_OUTV, ldi); vdin<=vfile[vidx(SB_P, ldi)]; vwe<=1'b1;
                         if (ldi==D-1) begin ldi<=0; sov<=spc; fc<=fc+1; phase<=PH_FW1; st<=BUILD; end
                         else ldi<=ldi+1; end
 
@@ -728,7 +749,7 @@ module gen_seq #(
                 // read), so compare here then step amax_i and let lraw re-settle (AMAXW).
                 AMAXC: begin: sweep
                     reg signed [31:0] v;
-                    v = $signed(lraw) >>> (sref_lm - csh[amax_i[9:6]]);
+                    v = $signed(lraw) >>> (sref_lm - csh[amax_i >> $clog2(D)]);
                     if (v > best_val) begin best_val <= v; best_idx <= amax_i; end
                     if (amax_i==VOCAB-1) begin
                         token <= best_idx;

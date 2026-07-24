@@ -68,3 +68,16 @@ web/dist/
 server/_work/
 server/vcd/*.vcd
 server/vcd/*.index.json
+
+# ---- rework dim-paramétrable : artefacts de debug / dump dim128 ----
+# Dumps synthétiques dim128 (regénérables via host/gen_synthetic_dim.py).
+host/gen_model_dump_dim*.json
+# Captures sim/oracle/rtl utilisées pour le debug du drift dim128 (sorties .txt).
+host/*_xb.txt
+host/oracle_*_xb.txt
+host/sim_*.txt
+host/rtl_xb.txt
+sim/sim_*.txt
+sim/oracle_*.txt
+sim/vobj_vlog.txt
+sim/vtest.txt

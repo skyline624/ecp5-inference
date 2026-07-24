@@ -1,7 +1,21 @@
 `timescale 1ns/1ps
 // gen_seq_top - one node (top.v LINK_SS) + the generation sequencer over ss_link.
 module gen_seq_top #(
-    parameter W = 8, parameter D = 64, parameter HS = 8, parameter NL = 5, parameter NPOS = 17
+    // D/NL/NPOS : largeurs des ports x_in[W*D-1:0] / result[W*D-1:0] / sw_*[NL*8-1:0].
+    // L'instance gen_seq interne utilise CFG_D/CFG_NL/CFG_NPOS (localparams model_cfg.vh,
+    // inclus dans le body). Les PORTS, eux, sont parsés AVANT model_cfg.vh -> ils ne
+    // voient pas CFG_D. Il faut donc que le défaut du paramètre D suive CFG_D selon le
+    // profile build-time. Sinon (bug historique dim128) result ne fait que 64 octets
+    // alors que gen_seq produit 128 octets -> troncature -> le probe lit 32 mots uint32
+    // mais les 16 hauts (octets 64..127) sont hors-borne = garbage (artefact de probe,
+    // pas un bug de compute). DIM128/HS16_PROFILE = flags -D passés au build.
+    parameter W = 8,
+`ifdef DIM128
+    parameter D = 128,
+`else
+    parameter D = 64,
+`endif
+    parameter HS = 8, parameter NL = 5, parameter NPOS = 17
 ) (
     input  wire           clk, rst_n, start, gen_mode,
     input  wire [W*D-1:0] x_in,
@@ -20,15 +34,24 @@ module gen_seq_top #(
     output wire [9:0]     token,
     output wire           token_valid,
     output wire           done,
+`ifdef SIM
+    output wire [5:0]    dbg_st,           // debug SIM-only : gen_seq FSM state (localise hang)
+    output wire [3:0]    dbg_phase,        // debug SIM-only : gen_seq phase (PH_*)
+    output wire [11:0]   dbg_idx,          // debug SIM-only : gen_seq idx (octet paquet / rcnt)
+    output wire [8:0]    dbg_node_state,   // debug SIM-only : node FSM state (localise hang)
+    output wire [31:0]   dbg_best_v,       // debug SIM-only : argmax best_val final (v du token émis)
+    output wire [9:0]    dbg_best_i,       // debug SIM-only : argmax best_idx final (= token émis)
+`endif
     // sonde sim-only : cache FFN BRAM rempli (path silicium FLASH_BOOT). Permet au
     // TB Verilog pur / au TB C++ Verilator d'attendre le fill SANS ref hierarchique
     // (dut.u_n.wcache_fill_done). Sempre 1 hors FLASH_BOOT (pas de cache fill).
     output wire           sim_fill_done
 );
     `include "model_cfg.vh"
-    // gen_seq shape from model_cfg.vh (source unique) : HID/LSTRIDE/OFF_*/LBASE.
-    // D/NL/NPOS restent des parameter (defaults dim 64 = CFG_). Pour dim 128+ :
-    // surcharger ces parameter ET éditer model_cfg.vh ensemble (TODO unification).
+    // gen_seq shape : HID/LSTRIDE/OFF_*/LBASE/H/KH/HS passés via CFG_* (rework dim Phase 1).
+    // D/NL/NPOS restent des parameter propagés à gen_seq (.D(D)) ; le PARENT (TB ou
+    // gen_seq_silicon) doit surcharger .D(CFG_D)/.NL(CFG_NL)/.NPOS(CFG_NPOS) pour que les
+    // ports [W*D-1:0]/[NL*8-1:0] matchent CFG_D/CFG_NL. dim paramétrable via `DIM128.
     wire [7:0] s_cmd_data;  wire s_cmd_wr;  wire s_cmd_full;
     wire [7:0] s_resp_data; wire s_resp_empty; wire s_resp_rd;
 
@@ -61,12 +84,31 @@ module gen_seq_top #(
 `else
     assign      sim_fill_done = 1'b1;                 // pas de cache fill hors FLASH_BOOT
 `endif
+`ifdef SIM
+    wire [5:0] dbg_st_w;                              // debug : gen_seq FSM state
+    wire [3:0] dbg_phase_w;                           // debug : gen_seq phase
+    wire [11:0] dbg_idx_w;                            // debug : gen_seq idx
+    wire [8:0] dbg_node_state_w;                      // debug : node FSM state
+    wire [31:0] dbg_best_v_w;                         // debug : argmax best_val final
+    wire [9:0]  dbg_best_i_w;                         // debug : argmax best_idx final
+    assign dbg_st = dbg_st_w;                         // sonde SIM-only (localise hang)
+    assign dbg_phase = dbg_phase_w;
+    assign dbg_idx = dbg_idx_w;
+    assign dbg_node_state = dbg_node_state_w;
+    assign dbg_best_v = dbg_best_v_w;
+    assign dbg_best_i = dbg_best_i_w;
+`endif
 
-    gen_seq #(.W(W), .D(D), .NL(NL), .NPOS(NPOS),
+    // rework dim Phase 1 : .D(CFG_D)/.NL(CFG_NL)/.NPOS(CFG_NPOS) (était .D(D) local défaut 64
+    // -> seq restait à dim 64 même sous DIM128, mismatch avec node CFG_D=128 -> deadlock FIFO).
+    gen_seq #(.W(W), .D(CFG_D), .NL(CFG_NL), .NPOS(CFG_NPOS),
               .H(CFG_H), .KH(CFG_KH), .HS(CFG_HS),
               .VOCAB(CFG_VOCAB), .NCHUNK(CFG_NCHUNK), .TMAX(CFG_TMAX),
               .HID(CFG_HID), .LSTRIDE(CFG_LSTRIDE), .LBASE(CFG_LBASE),
-              .OFF_W1(CFG_OFF_W1), .OFF_W3(CFG_OFF_W3), .OFF_W2(CFG_OFF_W2)) u_seq (
+              .OFF_RMS(CFG_OFF_RMS), .OFF_WQ(CFG_OFF_WQ), .OFF_WK(CFG_OFF_WK),
+              .OFF_WV(CFG_OFF_WV), .OFF_WO(CFG_OFF_WO), .OFF_RMSFF(CFG_OFF_RMSFF),
+              .OFF_W1(CFG_OFF_W1), .OFF_W3(CFG_OFF_W3), .OFF_W2(CFG_OFF_W2),
+              .A_RMSFINAL(CFG_A_RMSFINAL), .A_EMB(CFG_A_EMB), .KV_BASE(CFG_KV_BASE)) u_seq (
         .clk(clk), .rst_n(rst_n), .start(start), .gen_mode(gen_mode),
         .x_in(x_in), .sx_in(sx_in),
         .sw_rms(sw_rms), .swq(swq), .swk(swk), .swv(swv), .swo(swo),
@@ -80,7 +122,15 @@ module gen_seq_top #(
         .token_valid(token_valid), .done(done),
         // KV SDRAM maître direct (étape 1)
         .kv_addr(kv_addr), .kv_rd(kv_rd), .kv_wr(kv_wr), .kv_din(kv_din),
-        .kv_dout(kv_dout), .kv_busy(kv_busy), .kv_refresh(kv_refresh));
+        .kv_dout(kv_dout), .kv_busy(kv_busy), .kv_refresh(kv_refresh)
+`ifdef SIM
+        ,.dbg_st(dbg_st_w)
+        ,.dbg_phase(dbg_phase_w)
+        ,.dbg_idx(dbg_idx_w)
+        ,.dbg_best_v(dbg_best_v_w)
+        ,.dbg_best_i(dbg_best_i_w)
+`endif
+        );
 
     wire [7:0] c_rdata; wire c_empty; wire c_rd;
     async_fifo #(.DW(8), .AW(4)) u_cmd (
@@ -103,6 +153,9 @@ module gen_seq_top #(
         // KV maître : en sim, le seq a sa 2e SDRAM dédiée -> node SDRAM inchangée.
         .kv_addr(23'd0), .kv_rd(1'b0), .kv_wr(1'b0), .kv_din(8'd0), .kv_refresh(1'b0),
         .kv_dout(), .kv_busy()
+`ifdef SIM
+        ,.dbg_node_state(dbg_node_state_w)
+`endif
 `ifdef FLASH_BOOT
         ,// FLASH_BOOT mock : flash_* (SPI pins, unused en sim), shifts (drive_shifts
          // fournit sw_*), wcache_fill_done (le test attend ce signal avant start).

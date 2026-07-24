@@ -28,29 +28,30 @@
 // =============================================================================
 `timescale 1ns/1ps
 module tb_gen_seq_top_fb;
-    localparam W = 8, D = 64, NL = 5, NPOS = 17;
+    `include "model_cfg.vh"
+    localparam W = 8;
 
     reg clk = 1'b0;
     always #18.5 clk = ~clk;          // 37ns period ~27 MHz (match cocotb)
 
     reg rst_n = 1'b0;
     reg start = 1'b0, gen_mode = 1'b0;
-    reg [W*D-1:0]   x_in = 0;
+    reg [W*CFG_D-1:0]   x_in = 0;
     reg signed [7:0] sx_in = 0;
-    reg [NL*8-1:0]  sw_rms=0, swq=0, swk=0, swv=0, swo=0;
-    reg [NL*8-1:0]  sw_rmsf=0, sw1=0, sw3=0, sw2=0;
+    reg [CFG_NL*8-1:0]  sw_rms=0, swq=0, swk=0, swv=0, swo=0;
+    reg [CFG_NL*8-1:0]  sw_rmsf=0, sw1=0, sw3=0, sw2=0;
     reg signed [7:0] sw_rmsfinal=0, sw_emb=0;
     reg [5:0]       pos = 0;
     reg [16*10-1:0] prompt = 0;
     reg [6:0]       prompt_len = 0;
 
-    wire [W*D-1:0]    result;
+    wire [W*CFG_D-1:0]    result;
     wire signed [7:0] result_sh;
     wire [9:0]       token;
     wire             token_valid, done;
     wire             sim_fill_done;
 
-    gen_seq_top #(.W(W), .D(D), .NL(NL), .NPOS(NPOS)) dut (
+    gen_seq_top #(.W(W), .D(CFG_D), .NL(CFG_NL), .NPOS(CFG_NPOS)) dut (
         .clk(clk), .rst_n(rst_n), .start(start), .gen_mode(gen_mode),
         .x_in(x_in), .sx_in(sx_in),
         .sw_rms(sw_rms), .swq(swq), .swk(swk), .swv(swv), .swo(swo),
@@ -64,7 +65,7 @@ module tb_gen_seq_top_fb;
 
     // ---- entrees hex ----
     reg [31:0]      meta_mem [0:0];
-    reg [NL*8-1:0]  shifts_mem [0:10];
+    reg [CFG_NL*8-1:0]  shifts_mem [0:10];
     reg [9:0]       expect_tok [0:63];
     integer NTOK;
     integer got_count;

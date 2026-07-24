@@ -11,7 +11,7 @@
 # blows to 139% LUT and nextpnr cannot route on ECP5-45. With it: 57% LUT, Fmax
 # 33.56 MHz, routes cleanly. See memory note gen-silicon-nodeonly-fix.
 # =============================================================================
-[CmdletBinding()] param([switch]$Flash)
+[CmdletBinding()] param([switch]$Flash, [switch]$Dim128)
 
 # Source list for gen_seq_silicon (the wrapper + the `top` node with NODE_ONLY +
 # the gen_seq sequencer + async_fifo + the 3 UART PHYs + vec_alu2 + sdram + mac18
@@ -43,8 +43,12 @@ $Extra = (@(
 # named 'clk_sys_out'".
 # Appel build.ps1 avec params nommés explicites (le splatting @args est non fiable
 # en PS 5.1 : -Top est traité comme valeur positionnelle -> $Top="-Top", synth cassée).
+# -Dim128 : ajoute DIM128 aux defines (profile CFG_D=128 HS=16 NC=0 stream, rework dim).
+#   Sert aussi de 1er point de la courbe de capacité (dim128 tient-il en LUT/BRAM/Fmax ?).
+$defines = "NODE_ONLY,FLASH_BOOT,CLUSTER_NODE"
+if ($Dim128) { $defines += ",DIM128" }
 if ($Flash) {
-    & "$PSScriptRoot\build.ps1" -Top gen_seq_silicon -Extra $Extra -Defines "NODE_ONLY,FLASH_BOOT,CLUSTER_NODE" -Flash
+    & "$PSScriptRoot\build.ps1" -Top gen_seq_silicon -Extra $Extra -Defines $defines -Flash
 } else {
-    & "$PSScriptRoot\build.ps1" -Top gen_seq_silicon -Extra $Extra -Defines "NODE_ONLY,FLASH_BOOT,CLUSTER_NODE"
+    & "$PSScriptRoot\build.ps1" -Top gen_seq_silicon -Extra $Extra -Defines $defines
 }

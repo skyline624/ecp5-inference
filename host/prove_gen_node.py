@@ -118,9 +118,11 @@ def fq_matvec_chunked_N(W_i8, x_i8, sx, sw, n_chunks=3, chunk=64):
 
 
 def fq_matvec_w2(w2_i8, hg_i8, shc, sw2_s):
-    """W2 [D,HID] 3 blocs de 64 colonnes. FQ lb-6 par chunk, reduce via vec_alu2_add."""
+    """W2 [D,HID] NCHUNK_F blocs de D colonnes. FQ lb-6 par chunk, reduce via vec_alu2_add.
+    dim-paramétrique : chunk=D, n_chunks=ceil(HID/D)=NCHUNK_F (cohérent FSM GG RTL hardcodé 3)."""
     D, HID = w2_i8.shape
-    n_chunks = 3; chunk = 64
+    chunk = D
+    n_chunks = (HID + D - 1) // D
     # pad colonnes à 192 (hg_i8 est déjà [192] padded par fq_matvec_chunked_N)
     Wpad = np.zeros((D, n_chunks * chunk), dtype=np.int8)
     Wpad[:, :HID] = w2_i8
@@ -273,13 +275,16 @@ def attention_head_lut(Q_i8, K_i8, V_i8, T, score_sh=0):
 
 
 # ---- Argmax lm_head (adapté de gen_seq.v AMAX_INIT/AMAX/AMAXC) ----------------
-def argmax_lm_head(logits_i8, csh):
-    """sref_lm = max(csh). v = logits[i] >>> (sref_lm - csh[i>>6]). ties = premier index."""
+def argmax_lm_head(logits_i8, csh, D, VOCAB):
+    """sref_lm = max(csh). v = logits[i] >>> (sref_lm - csh[i>>clog2(D)]). ties = premier index.
+    dim-paramétrique : chunk = i >> clog2(D) (clog2(D)=D.bit_length()-1, D pow2). Borne
+    argmax à VOCAB-1 (cohérent RTL amax_i==VOCAB-1). À dim=64 : log2D=6 = i>>6 historique."""
     sref_lm = max(csh)
     best_val = -2147483647
     best_idx = 0
-    for i in range(len(logits_i8)):
-        chunk = i >> 6
+    log2D = D.bit_length() - 1                           # clog2(D) : 6 dim=64, 7 dim=128
+    for i in range(VOCAB):
+        chunk = i >> log2D
         v = int(logits_i8[i]) >> (sref_lm - csh[chunk])  # sref_lm>=csh -> shift >= 0
         if v > best_val:
             best_val = v
@@ -287,36 +292,42 @@ def argmax_lm_head(logits_i8, csh):
     return best_idx, sref_lm
 
 
-# ---- FFN chunké (W1/W3 3 chunks, silu/MUL par chunk, W2 3 chunks + reduce) ---
+# ---- FFN chunké (W1/W3 NCHUNK_F chunks, silu/MUL par chunk, W2 NCHUNK_F chunks + reduce) ---
 def ffn_chunked_lut(w, XN_i8, sxn):
-    H1, s1c = fq_matvec_chunked_N(w['w1'], XN_i8, sxn, w['w1_s'])   # [192], [3]
-    H3, s3c = fq_matvec_chunked_N(w['w3'], XN_i8, sxn, w['w3_s'])
+    D = XN_i8.shape[0]
+    HID = w['w1'].shape[0]                               # w1 [HID, D]
+    NCHUNK_F = (HID + D - 1) // D                        # 3 (FSM GG RTL hardcodé ; HID=3*D à dim>=128)
+    HIDPAD = NCHUNK_F * D                               # 192 dim=64, 384 dim=128
+    H1, s1c = fq_matvec_chunked_N(w['w1'], XN_i8, sxn, w['w1_s'], NCHUNK_F, D)   # [HIDPAD], [NCHUNK_F]
+    H3, s3c = fq_matvec_chunked_N(w['w3'], XN_i8, sxn, w['w3_s'], NCHUNK_F, D)
     # silu par chunk
-    SG = np.zeros(192, dtype=np.int8); ssgc = [0, 0, 0]
-    for c in range(3):
-        a = c * 64; b = a + 64
+    SG = np.zeros(HIDPAD, dtype=np.int8); ssgc = [0] * NCHUNK_F
+    for c in range(NCHUNK_F):
+        a = c * D; b = a + D
         sg_c, _ = silu_lut(H1[a:b], s1c[c])
         SG[a:b] = sg_c
         ssgc[c] = s1c[c]                                # silu shift_out = sx
     # MUL par chunk
-    HG = np.zeros(192, dtype=np.int8); shc = [0, 0, 0]
-    for c in range(3):
-        a = c * 64; b = a + 64
+    HG = np.zeros(HIDPAD, dtype=np.int8); shc = [0] * NCHUNK_F
+    for c in range(NCHUNK_F):
+        a = c * D; b = a + D
         att_c, sh = vec_alu2_mul(SG[a:b], ssgc[c], H3[a:b], s3c[c])
         HG[a:b] = att_c
         shc[c] = sh
-    # W2 (3 chunks K) + reduce
+    # W2 (NCHUNK_F chunks K) + reduce
     OUTV, sov = fq_matvec_w2(w['w2'], HG, shc, w['w2_s'])
     return OUTV, sov
 
 
-# ---- LM head chunké (8 chunks de 64, csh[8]) --------------------------------
+# ---- LM head chunké (NCHUNK_LM chunks de D, csh[NCHUNK_LM]) ----------------
 def lm_head_chunked_lut(m, XN_i8, sxn):
-    tok_emb = m['tok_emb']                              # [512, 64] int8
-    logits = np.zeros(512, dtype=np.int8)
-    csh = [0] * 8
-    for c in range(8):
-        a = c * 64; b = a + 64
+    tok_emb = m['tok_emb']                              # [VOCAB, D] int8
+    VOCAB, D = tok_emb.shape
+    NCHUNK_LM = (VOCAB + D - 1) // D                    # ceil(VOCAB/D) ; 8 dim=64, 4 dim=128, 1 dim=512
+    logits = np.zeros(VOCAB, dtype=np.int8)
+    csh = [0] * NCHUNK_LM
+    for c in range(NCHUNK_LM):
+        a = c * D; b = min(a + D, VOCAB)                # dernier chunk partiel si VOCAB%D != 0
         y = tok_emb[a:b].astype(np.int64) @ XN_i8.astype(np.int64)
         y8, sh = fq_requant_lb6(y, sxn + m['tok_emb_s'])
         logits[a:b] = y8
@@ -354,7 +365,7 @@ def forward_node(m, n_tokens=17):
     cfg = m['cfg']
     NL = cfg['n_layers']; H = cfg['n_heads']; KH = cfg['n_kv_heads']
     HS = cfg['head_size']; D = cfg['dim']
-    TMAX = 32; KVW = KH * HS
+    TMAX = int(cfg.get('t_max', 32)); KVW = KH * HS
     HALF = HS // 2; NREP = H // KH
     score_sh = int(cfg.get('score_sh', 0))   # pre-shift score (0=HS=8, 1=HS=16)
     # ROM RoPE selon HS (HS=16 -> fichiers _hs16, sinon HS=8)
@@ -423,7 +434,7 @@ def forward_node(m, n_tokens=17):
         # ---- LM head 8 chunks ----
         logits, csh = lm_head_chunked_lut(m, XN, sxn)
         # ---- argmax ----
-        best_idx, _ = argmax_lm_head(logits, csh)
+        best_idx, _ = argmax_lm_head(logits, csh, D, cfg['vocab_size'])
         out.append(int(best_idx))
         cur_tok = int(best_idx)
     return out, kmem, vmem, ksh, vsh

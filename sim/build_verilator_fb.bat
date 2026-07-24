@@ -6,7 +6,7 @@ call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliar
 if errorlevel 1 ( echo vcvars64 FAILED & exit /b 1 )
 set VINC=C:\oss-cad-suite\share\verilator\include
 cl /nologo /EHsc /O2 /std:c++20 /permissive- /W1 ^
-   /I vobj /I "%VINC%" /I "%VINC%\vltstd" ^
+   /I vobj /I "%VINC%" /I "%VINC%\vltstd" %CXXDEFS% ^
    /Fe:vobj\tb_verilator.exe /Fo:vobj\ ^
    vobj\*.cpp sim_main.cpp ^
    "%VINC%\verilated.cpp" "%VINC%\verilated_timing.cpp" "%VINC%\verilated_threads.cpp" 2>&1

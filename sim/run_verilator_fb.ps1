@@ -9,6 +9,7 @@
 # Usage (depuis sim/) :
 #   .\run_verilator_fb.ps1                  # HS=8 stories260K, 17 tokens
 #   .\run_verilator_fb.ps1 -Hs16            # HS=16 Strat A (HS=16 H=4 KH=2)
+#   .\run_verilator_fb.ps1 -StreamFFN       # NC=0 stream SDRAM (Phase 5 : path FFN stream bit-exact)
 #   .\run_verilator_fb.ps1 -Ntok 3          # 3 tokens (iteration rapide ~6s)
 #   .\run_verilator_fb.ps1 -SkipBuild       # juste relancer l'exe existant
 #
@@ -18,6 +19,8 @@
 # =============================================================================
 param(
     [switch]$Hs16,
+    [switch]$StreamFFN,
+    [switch]$Dim128,
     [int]$Ntok = 17,
     [string]$Dump = "",
     [switch]$SkipBuild
@@ -30,8 +33,9 @@ $env:PERL5LIB = "$PSScriptRoot\vlib"
 Set-Location $PSScriptRoot
 
 if ($Dump -eq "") {
-    if ($Hs16) { $Dump = "..\host\gen_model_dump_hs16_rand.json" }
-    else       { $Dump = "..\host\gen_model_dump.json" }
+    if ($Dim128)  { $Dump = "..\host\gen_model_dump_dim128.json" }
+    elseif ($Hs16) { $Dump = "..\host\gen_model_dump_hs16_rand.json" }
+    else           { $Dump = "..\host\gen_model_dump.json" }
 }
 $env:DUMP = $Dump
 
@@ -50,14 +54,39 @@ if (-not $SkipBuild) {
                "../src/uart_bridge.v ../src/gen_seq.v ../src/gen_seq_top.v"
     $defs = "-DLINK_SS -DSDRAM_PRELOAD -DSIM -DFLASH_BOOT"
     if ($Hs16) { $defs += " -DHS16_PROFILE" }
+    if ($StreamFFN) { $defs += " -DNC0_PROFILE" }
+    if ($Dim128) { $defs += " -DDIM128" }
+    # C++ TB : nb de mots uint32 du port result (W*D/32). 16 dim=64, 32 dim=128.
+    # Positionné AVANT le build pour que build_verilator_fb.bat (%CXXDEFS%) le voie.
+    if ($Dim128) { $env:CXXDEFS = "/DXB_WORDS=32" } else { $env:CXXDEFS = "" }
     $wflags = "-Wno-fatal -Wno-UNOPTFLAT -Wno-UNUSED -Wno-WIDTH -Wno-UNDRIVEN " +
               "-Wno-CASEINCOMPLETE -Wno-INITIALDLY -Wno-PINMISSING -Wno-IMPLICIT " +
               "-Wno-LITENDIAN -Wno-BLKANDNBLK -Wno-CASEX -Wno-UNOPT"
     Write-Host "==> verilator --cc (untimed, top=gen_seq_top, HS16=$Hs16)" -ForegroundColor Cyan
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    # pas de pipe (le pipe fausse $LASTEXITCODE = exit de tail, pas verilator) :
-    # on redirige vers un log, on check l'exit de verilator, puis on affiche la fin.
-    cmd /c "verilator --cc $wflags $defs -I../src --top-module gen_seq_top -Mdir vobj $srcList > vobj_vlog.txt 2>&1"
+    # Verilator = wrapper Perl SANS extension ; cmd /c "verilator ..." échoue ("n'est
+    # pas reconnu") car cmd ne cherche que .com/.exe/.bat/.cmd. On invoque donc perl
+    # (Git MSYS, C:\Program Files\Git\usr\bin\perl.exe) explicitement sur le wrapper
+    # (PERL5LIB=stub Pod::Usage, positionné plus haut). Le wrapper exec verilator_bin.exe
+    # (trouvé via PATH oss-cad-suite hérité du processus PowerShell).
+    $perlExe    = "C:\Program Files\Git\usr\bin\perl.exe"
+    # Le wrapper verilator calcule VERILATOR_ROOT = realpath("$RealBin/../share/verilator")
+    # via FindBin/Cwd. Si $0 est un path Windows (C:\...\verilator), realpath() ÉCHOUE
+    # (backslashes) -> $verilator_root undef -> fallback C++ sur le prefix HARDCODED au
+    # build "/yosyshq/share/verilator" (inexistant sous Git perl) -> "Cannot find
+    # verilated_std.sv". FIX : passer $0 en path MSYS (/c/...) -> realpath OK ->
+    # VERILATOR_ROOT=/c/oss-cad-suite/share/verilator (correct). Dérivé de YOSYSHQ_ROOT
+    # (positionné par environment.ps1) pour ne pas hardcoder le drive.
+    $yq = $env:YOSYSHQ_ROOT.TrimEnd('\') -replace '\\','/'          # C:/oss-cad-suite
+    $drv = ($yq -replace ':.*','').ToLower()                       # c
+    $yqMsys = '/' + $drv + ($yq -replace '^.:','')                 # /c/oss-cad-suite
+    $verilator  = "$yqMsys/bin/verilator"
+    $vargs = @('--cc') +
+             ($wflags -split ' ' | Where-Object { $_ }) +
+             ($defs    -split ' ' | Where-Object { $_ }) +
+             @('-I../src','--top-module','gen_seq_top','-Mdir','vobj') +
+             ($srcList -split ' ' | Where-Object { $_ })
+    & $perlExe $verilator @vargs *> vobj_vlog.txt
     $vrc = $LASTEXITCODE
     if ($vrc -ne 0) { Get-Content vobj_vlog.txt | Select-Object -Last 20; throw "verilator --cc failed (exit $vrc)" }
     Get-Content vobj_vlog.txt | Select-Object -Last 2
@@ -72,7 +101,12 @@ if (-not $SkipBuild) {
 }
 
 # ---- run + chrono ----
-Write-Host "==> run tb_verilator.exe (NTOK=$Ntok, HS16=$Hs16)" -ForegroundColor Cyan
+# NC=0 stream SDRAM est ~3x plus lent (FFN streamé a chaque token) -> le cap cycles
+# anti-hang du TB (40M, calibré NC=5) déborde avant 17 tokens. On lève le cap via env.
+# Dim128 = profile DIM128 -> CFG_NC=0 automatique (stream) -> cap élevé aussi.
+if ($StreamFFN -or $Dim128) { $env:SIM_CYCLE_CAP = "260000000" }  # dim128 NC=0 stream ~10M cyc/tok -> 17 tokens ~170M+margin
+else            { $env:SIM_CYCLE_CAP = "" }   # défaut TB 40M
+Write-Host "==> run tb_verilator.exe (NTOK=$Ntok, HS16=$Hs16, StreamFFN=$StreamFFN, Dim128=$Dim128)" -ForegroundColor Cyan
 $sw3 = [System.Diagnostics.Stopwatch]::StartNew()
 $out = & ".\vobj\tb_verilator.exe" 2>&1
 $rc = $LASTEXITCODE

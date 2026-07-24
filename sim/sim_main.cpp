@@ -13,6 +13,12 @@
 
 double sc_time_stamp() { return 0; }
 
+// nombre de mots uint32 du port result (W*D/32). 16 dim=64, 32 dim=128.
+// Passé via /DXB_WORDS=32 par le wrapper (build_verilator_fb.bat %CXXDEFS%) en dim128.
+#ifndef XB_WORDS
+#define XB_WORDS 16
+#endif
+
 static Vgen_seq_top* top;
 static void tick() {            // 1 cycle : front descendant puis front montant
     top->clk = 0; top->eval();
@@ -66,21 +72,51 @@ int main(int argc, char** argv) {
     int got = 0, mismatch = 0;
     uint8_t tv_d = 1;   // pas de faux front au demarrage
     uint64_t wd = 0;
+    // Cap cycles anti-hang. Defaut 40M (calibré NC=5 cache BRAM). NC=0 stream SDRAM
+    // est ~3x plus lent (FFN streamé a chaque token) -> 17 tokens dépassent 40M. Le
+    // wrapper run_verilator_fb.ps1 passe SIM_CYCLE_CAP plus élevé via -StreamFFN.
+    uint64_t cap = 40'000'000;
+    if (const char* e = std::getenv("SIM_CYCLE_CAP")) cap = (uint64_t)strtoull(e, nullptr, 0);
     while (got < NTOK) {
         tick(); wd++;
         uint8_t tv = top->token_valid & 1;
         if (tv && !tv_d) {
             int tok = (int)(top->token & 0x3FF);
+            int bv = (int)(top->dbg_best_v & 0xFFFFFFFF);
+            int bi = (int)(top->dbg_best_i & 0x3FF);
+            int sh = (int)(top->result_sh & 0xFF);
+            // XB (result) : 32 mots uint32 little-endian par octet (match oracle diag)
+            char hexbuf[XB_WORDS*9+1]; hexbuf[0]=0;
+            for (int w=0; w<XB_WORDS; w++) {
+                uint32_t wd = top->result[w];
+                char tmp[9]; snprintf(tmp,9,"%08x",(unsigned)wd); strcat(hexbuf,tmp);
+                if (w<31) strcat(hexbuf," ");
+            }
             if (tok != (int)expect[got]) {
-                printf("MISMATCH tok[%d]=%d expect=%d\n", got, tok, (int)expect[got]);
+                printf("MISMATCH tok[%d]=%d expect=%d  (rtl best_i=%d best_v=%d) sh=%d XB=%s\n", got, tok, (int)expect[got], bi, bv, sh, hexbuf);
                 mismatch++;
             } else {
-                printf("tok[%d]=%d OK\n", got, tok);
+                printf("tok[%d]=%d OK  (best_i=%d best_v=%d) sh=%d XB=%s\n", got, tok, bi, bv, sh, hexbuf);
             }
             got++;
         }
         tv_d = tv;
-        if (wd > 40'000'000) { printf("FAIL: gen timeout got=%d/%d\n", got, NTOK); top->final(); return 1; }
+        // debug hang : print le FSM state a CHAQUE changement (montre la séquence avant
+        // figeage). Le dernier print avant silence = state où le seq hang.
+        uint8_t stc = top->dbg_st & 0x3F;
+        static uint8_t st_d = 0xFF;
+        uint16_t nst = top->dbg_node_state & 0x1FF;
+        if (stc != st_d) {
+            printf("wd=%llu st=%u ph=%u idx=%llu nst=%u (was %u)\n", (unsigned long long)wd,
+                   (unsigned)stc, (unsigned)(top->dbg_phase & 0xF),
+                   (unsigned long long)(top->dbg_idx & 0xFFF), (unsigned)nst, (unsigned)st_d);
+            st_d = stc;
+        }
+        if (wd > cap) { printf("FAIL: gen timeout got=%d/%d (cap=%llu) st=%u ph=%u idx=%llu nst=%u\n",
+                       got, NTOK, (unsigned long long)cap, (unsigned)(top->dbg_st & 0x3F),
+                       (unsigned)(top->dbg_phase & 0xF), (unsigned long long)(top->dbg_idx & 0xFFF),
+                       (unsigned)(top->dbg_node_state & 0x1FF));
+                       top->final(); return 1; }
     }
     if (mismatch == 0)
         printf("PASS: %d/%d bit-exact vs node_tokens (Verilator untimed C++ TB)\n", got, NTOK);

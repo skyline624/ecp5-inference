@@ -30,13 +30,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DUMP = os.environ.get("DUMP", os.path.join(HERE, "gen_model_dump.json"))
 OUT_HEX = os.environ.get("OUT_HEX", os.path.join(HERE, "..", "sim", "sdram_preload.hex"))
 
-# Shape lue depuis le dump (m['cfg'], lui-même issu du header modèle llama2.c) ->
-# plus de magic numbers hardcodés. Les offsets OFF/LBASE/LSTRIDE restent fixés pour
-# le layout dim 64 (généralisation à dim 128+ = TODO, voir model_cfg.vh).
-LBASE, LSTRIDE = 0x010000, 0x010000
-A_RMSFINAL, A_EMB = 0x060000, 0x000000
-OFF = dict(rms_att=0x0000, wq=0x0100, wk=0x1100, wv=0x1900, wo=0x2100,
-           rms_ffn=0x3100, w1=0x3200, w3=0x6200, w2=0x9200)
+# Shape lue depuis le dump (m['cfg']) -> D/HID/NL/H/KH/HS/VOCAB. Le layout SDRAM
+# (offsets intra-couche OFF_*, LBASE, LSTRIDE, A_RMSFINAL, A_EMB) est dérivé
+# ci-dessous dans main() par les MÊMES formules cumulatives que src/model_cfg.vh
+# (CFG_OFF_*/CFG_LSTRIDE/CFG_A_*). Pas de magic numbers : dim-paramétrique.
 
 
 def rows(M, a, b, cols):
@@ -76,6 +73,25 @@ def main():
     # (identique au RTL gen_seq.v / model_cfg.vh : 172 -> 192 = 3 chunks).
     HIDPAD = ((HID + D - 1) // D) * D
     NCHUNK = HIDPAD // D
+    KVW = KH * HS
+
+    # ---- Layout SDRAM cumulatif (DOIT matcher src/model_cfg.vh CFG_OFF_*) ----
+    # rms_att=D, WQ=D*D, WK/WV=KVW*D, WO=D*D, rms_ffn=D, W1/W3/W2=NCHUNK*D*D.
+    OFF = {}
+    OFF['rms_att'] = 0
+    OFF['wq']      = D
+    OFF['wk']      = D + D*D
+    OFF['wv']      = D + D*D + KVW*D
+    OFF['wo']      = D + D*D + 2*KVW*D
+    OFF['rms_ffn'] = D + 2*D*D + 2*KVW*D
+    OFF['w1']      = 2*D + 2*D*D + 2*KVW*D            # = rms_ffn + D
+    OFF['w3']      = OFF['w1'] + NCHUNK*D*D
+    OFF['w2']      = OFF['w3'] + NCHUNK*D*D
+    layer_sz = OFF['w1'] + 3*NCHUNK*D*D               # = OFF_W1 + 3*MAT_SZ
+    LBASE    = 0x010000
+    LSTRIDE  = 1 << (layer_sz - 1).bit_length() if layer_sz > 1 else 1  # next pow2 >= layer_sz
+    A_EMB       = 0x000000                            # tok_emb @ 0 (VOCAB*D octets)
+    A_RMSFINAL  = LBASE + NL * LSTRIDE                 # après les NL couches
 
     lines = []
     # Embedding table @ 0x000000 (row-major [VOCAB,D])

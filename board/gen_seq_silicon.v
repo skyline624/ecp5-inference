@@ -27,7 +27,7 @@
 //                       each token_valid packs 2 bytes to uart_tx. Host is read-only.
 // =============================================================================
 module gen_seq_silicon #(
-    parameter W = 8, parameter D = 64, parameter NL = 5, parameter NPOS = 17,
+    parameter W = 8,
     parameter NPR = 16        // max prompt tokens for prefill (PR opcode)
 ) (
     input  wire           clk,                 // 25 MHz, pin P3
@@ -52,9 +52,9 @@ module gen_seq_silicon #(
 `endif
 );
     `include "model_cfg.vh"
-    // gen_seq shape from model_cfg.vh (source unique) : HID/LSTRIDE/OFF_*/LBASE.
-    // D/NL/NPOS/NPR restent des parameter (defaults dim 64 = CFG_). Pour dim 128+ :
-    // surcharger ces parameter ET éditer model_cfg.vh ensemble (TODO unification).
+    // gen_seq shape from model_cfg.vh (source unique) : D/HID/NL/NPOS/HS/H/KH/...
+    // Tous passés via CFG_* (rework dim Phase 1 : .D(CFG_D), .NL(CFG_NL), .NPOS(CFG_NPOS)).
+    // dim paramétrable : `DIM128 active CFG_D=128/HS=16/NC=0 stream (cf model_cfg.vh).
 
     // ---- Power-on reset (raw clk domain; the node has its own internal POR) ----
     // Counter saturates at 0xFFFF so rst_n = por[15] rises once and STAYS high.
@@ -75,7 +75,7 @@ module gen_seq_silicon #(
         .clk(clk), .rst(uart_rst), .data(tx_data_w), .send(tx_send_w), .tx(uart_tx), .busy(tx_busy));
 
     // ---- Shift register file (47 bytes loaded by `SH`, held for the whole run) ----
-    reg [NL*8-1:0] sw_rms, swq, swk, swv, swo, sw_rmsf, sw1, sw3, sw2;
+    reg [CFG_NL*8-1:0] sw_rms, swq, swk, swv, swo, sw_rmsf, sw1, sw3, sw2;
     reg signed [7:0] sw_rmsfinal, sw_emb;
 
     // ---- Prompt register file (loaded by `PR`, fed to gen_seq at GO) ----
@@ -118,7 +118,7 @@ module gen_seq_silicon #(
     wire [7:0] s_cmd_data;  wire s_cmd_wr;
     wire [7:0] s_resp_data; wire s_resp_rd;
     wire [9:0] token;  wire token_valid;  wire done;
-    wire [W*D-1:0] result;  wire signed [7:0] result_sh;
+    wire [W*CFG_D-1:0] result;  wire signed [7:0] result_sh;
 
     // clk_sys = node system clock (PLL output, 31.25 MHz). The host FSM + UART + gen_seq
     // run on `clk` (25 MHz crystal); the compute node runs on clk_sys. The two async_fifo
@@ -164,13 +164,16 @@ module gen_seq_silicon #(
     wire [22:0] n_kv_addr;  wire n_kv_rd, n_kv_wr;  wire [7:0] n_kv_din;
     wire        n_kv_refresh; wire [7:0] n_sd_dout;  wire n_sd_busy;
 
-    gen_seq #(.W(W), .D(D), .NL(NL), .NPOS(NPOS), .NPR(NPR),
+    gen_seq #(.W(W), .D(CFG_D), .NL(CFG_NL), .NPOS(CFG_NPOS), .NPR(NPR),
               .H(CFG_H), .KH(CFG_KH), .HS(CFG_HS),
               .VOCAB(CFG_VOCAB), .NCHUNK(CFG_NCHUNK), .TMAX(CFG_TMAX),
               .HID(CFG_HID), .LSTRIDE(CFG_LSTRIDE), .LBASE(CFG_LBASE),
-              .OFF_W1(CFG_OFF_W1), .OFF_W3(CFG_OFF_W3), .OFF_W2(CFG_OFF_W2)) u_seq (
+              .OFF_RMS(CFG_OFF_RMS), .OFF_WQ(CFG_OFF_WQ), .OFF_WK(CFG_OFF_WK),
+              .OFF_WV(CFG_OFF_WV), .OFF_WO(CFG_OFF_WO), .OFF_RMSFF(CFG_OFF_RMSFF),
+              .OFF_W1(CFG_OFF_W1), .OFF_W3(CFG_OFF_W3), .OFF_W2(CFG_OFF_W2),
+              .A_RMSFINAL(CFG_A_RMSFINAL), .A_EMB(CFG_A_EMB), .KV_BASE(CFG_KV_BASE)) u_seq (
         .clk(clk), .rst_n(rst_n & seq_rst_n), .start(start_pulse), .gen_mode(1'b1),
-        .x_in({W*D{1'b0}}), .sx_in(8'sd0),
+        .x_in({W*CFG_D{1'b0}}), .sx_in(8'sd0),
         .sw_rms(sw_rms), .swq(swq), .swk(swk), .swv(swv), .swo(swo),
         .sw_rmsf(sw_rmsf), .sw1(sw1), .sw3(sw3), .sw2(sw2),
         .sw_rmsfinal(sw_rmsfinal), .sw_emb(sw_emb),

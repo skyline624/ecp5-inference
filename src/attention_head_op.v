@@ -215,11 +215,21 @@ module attention_head_op #(
     end
 
     integer pi;
+`ifdef SIM
+    integer tt;
+    reg signed [15:0] sc;
+    reg [15:0] ev;
+    reg [15:0] at;
+    reg sim_t2_seen;        // gate dump au 1er call T>=2 (L0h0p1)
+`endif
     always @(posedge clk) begin
         if (rst) begin
             state  <= S_IDLE;
             done   <= 1'b0;
             out_we <= 1'b0;
+`ifdef SIM
+            sim_t2_seen <= 1'b0;
+`endif
         end else begin
             out_we <= 1'b0;
             done   <= 1'b0;
@@ -248,6 +258,11 @@ module attention_head_op #(
                 S_SC_W2: state <= S_SC_MULT;
                 S_SC_MULT: begin
                     dot_acc <= dot_acc + qk_prod;
+`ifdef SIM
+                    if (T >= 6'd2 && !sim_t2_seen)
+                        $display("QK t=%0d i=%0d Q=%0d K=%0d qk=%0d dot=%0d",
+                                 t_idx, i_idx, Q_reg[i_idx], k_rdata, qk_prod, dot_acc + qk_prod);
+`endif
                     state   <= S_SC_NEXT_I;
                 end
                 S_SC_NEXT_I: begin
@@ -370,6 +385,10 @@ module attention_head_op #(
                     out_waddr <= {6'd0, d_idx[3:0]};
                     out_wdata <= out_clip;
                     out_we    <= 1'b1;
+`ifdef SIM
+                    if (T >= 6'd2)
+                        $display("ATTN_OUT d=%0d out_acc=%0d out_clip=%0d", d_idx, out_acc, out_clip);
+`endif
                     if (d_idx == HS - 1) begin
                         dbg_score_last <= scores_packed[(T - 6'd1)*16 +: 16];
                         state <= S_DONE;
@@ -380,6 +399,19 @@ module attention_head_op #(
                 end
 
                 S_DONE: begin
+`ifdef SIM
+                    if (T >= 6'd2) begin
+                        $display("ATTN T=%0d HS=%0d max_score=%0d sum_acc=%0d inv_sum=%0d",
+                                  T, HS, max_score, sum_acc, inv_sum);
+                        for (tt = 0; tt < T; tt = tt + 1) begin
+                            sc = $signed(scores_packed[tt*16 +: 16]);
+                            ev = ev_packed[tt*16 +: 16];
+                            at = att_packed[tt*16 +: 16];
+                            $display("  t=%0d score=%0d ev=%0d attn=%0d", tt, sc, ev, at);
+                        end
+                        sim_t2_seen <= 1'b1;     // 1er T2 vu : prochains calls non dumpés
+                    end
+`endif
                     done  <= 1'b1;
                     state <= S_IDLE;
                 end

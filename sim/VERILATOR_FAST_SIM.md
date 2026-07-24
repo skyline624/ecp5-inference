@@ -25,7 +25,7 @@ Le wrapper fait : `gen_tb_hex.py` + `gen_sdram_preload_hex.py` (depuis le Dump) 
 sortie après 50s) — overhead scheduler/coroutine par always-block. Le mode rapide =
 **untimed** : le C++ drive clk (`top->clk=0;eval;clk=1;eval`), pas de scheduler Verilator.
 
-## Setup non-trivial (3 pièges)
+## Setup non-trivial (4 pièges)
 
 ### 1. Perl Pod::Usage manquant
 Le wrapper `verilator` est un script Perl qui `use Pod::Usage;` (ligne 17,
@@ -33,6 +33,25 @@ inconditionnel). Le perl MSYS 5.38 (`/usr/bin/perl`) est ecorché (pas de module
 - Fix : stub `sim/vlib/Pod/Usage.pm` (pod2usage = print + exit) + `$env:PERL5LIB = "$PSScriptRoot\vlib"`.
 - Le binaire natif `verilator_bin.exe` marche seul mais ne fait que générer le C++ (pas le link) — le wrapper Perl orchestre le build, donc on a besoin du stub.
 - (`verilator --version` sans le stub echoue avec "Can't locate Pod/Usage.pm".)
+- **Invocation** : le wrapper `verilator` n'a **pas d'extension** → `cmd /c "verilator …"`
+  échoue ("n'est pas reconnu") car cmd ne cherche que `.com/.exe/.bat/.cmd`. On invoque
+  donc **perl explicitement** sur le wrapper :
+  `& "C:\Program Files\Git\usr\bin\perl.exe" "<verilator>" --cc …` (Git perl = le
+  `/usr/bin/perl` MSYS, le seul disponible ; oss-cad-suite ne bundle pas de perl).
+
+### 1bis. VERILATOR_ROOT : passer $0 en path MSYS (/c/…), pas Windows (C:\…)
+Le wrapper calcule `VERILATOR_ROOT = realpath("$RealBin/../share/verilator")` via
+FindBin/Cwd (ligne 92). **Si `$0` est un path Windows** (`C:\oss-cad-suite\bin\verilator`),
+`realpath()` échoue (mélange backslash/forward-slash) → `$verilator_root` undef →
+fallback C++ sur le prefix **hardcodé au build** `/yosyshq/share/verilator` (inexistant
+sous Git perl) → `%Error: Cannot find verilated_std.sv`.
+- Fix : passer `$0` en **path MSYS** (`/c/oss-cad-suite/bin/verilator`) → `realpath()` OK
+  → `VERILATOR_ROOT=/c/oss-cad-suite/share/verilator` (correct).
+- `run_verilator_fb.ps1` dérive ce path MSYS depuis `$env:YOSYSHQ_ROOT` (positionné par
+  `environment.ps1`) : `TrimEnd('\')` → replace `\` par `/` → préfixe le drive `C:` →
+  `/c/oss-cad-suite`. Ne pas hardcoder le drive.
+- Diagnostique : `perl <verilator> --debug --getenv VERILATOR_ROOT` doit afficher
+  `/c/oss-cad-suite/share/verilator` (et non `''` + warning `uninitialized $verilator_root`).
 
 ### 2. MSVC cl.exe (pas de g++/gcc/clang sur cette machine)
 VS 2022 BuildTools installe : `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`.
