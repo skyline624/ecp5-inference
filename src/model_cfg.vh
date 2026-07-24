@@ -32,7 +32,26 @@
 // le rework HS). Défaut = stories260K HS=8. CFG_SCORE_SH = pre-shift du score
 // d'attention avant le clip int16 (calibrage ALU dépendant de HS, pas un weight
 // shift) : 0 pour HS=8 (non-régression bit-exact par construction), 1 pour HS=16.
-`ifdef DIM128
+`ifdef DIM512
+localparam CFG_D    = 512;    // dim (palier 3 rework dim, Phase 7)
+// HID = 3*D (NCHUNK_F=3 FSM GG hardcodé), HS=16, KVW=32 fixe (évite rework KV :
+// attn_kv_stride/BSRAM K/V dimensionnés pour KVW=32). D=H*HS, KH=KVW/HS=2, H=D/HS,
+// NREP=H/KH. D=512 -> H=32 KH=2 NREP=16 (mh_h largeur $clog2(CFG_H):0 côté node_top).
+localparam CFG_HID  = 3*CFG_D;
+localparam CFG_NC   = 0;      // stream SDRAM (FFN streamé, BRAM libérée)
+localparam CFG_HS   = 16;
+localparam CFG_H    = 32;     // n_heads (D=H*HS=32*16=512)
+localparam CFG_KH   = 2;      // n_kv_heads (KVW=KH*HS=2*16=32 inchangé)
+localparam CFG_SCORE_SH = 1;  // pre-shift score (HS=16)
+`elsif DIM256
+localparam CFG_D    = 256;    // dim (palier 2 rework dim, Phase 7)
+localparam CFG_HID  = 3*CFG_D; // D=256 -> H=16 KH=2 NREP=8
+localparam CFG_NC   = 0;
+localparam CFG_HS   = 16;
+localparam CFG_H    = 16;     // n_heads (D=H*HS=16*16=256)
+localparam CFG_KH   = 2;
+localparam CFG_SCORE_SH = 1;
+`elsif DIM128
 localparam CFG_D    = 128;    // dim (palier 1 rework dim)
 // HID = 3*D (NCHUNK_F=3) : la FSM GG FFN hardcode 3 chunks (états
 // S_GG_SETUP_W1/W3_CH0/CH1/CH2 + offsets k*D). Rendre NCHUNK_F>3 paramétrique = rework
@@ -88,6 +107,7 @@ localparam CFG_HALF   = CFG_HS/2;                            // 4 (paires RoPE, 
 localparam CFG_LOG2_HS   = $clog2(CFG_HS);                   // 3 (slice i_idx/d_idx, shift << HS)
 localparam CFG_LOG2_HALF = $clog2(CFG_HALF);                 // 2 (index cos/sin_reg)
 localparam CFG_LOG2_NREP = $clog2(CFG_NREP);                 // 1 (mh_h >> log2(NREP) pour kv_offset)
+localparam CFG_LOG2_H    = $clog2(CFG_H);                    // 3..5 (mh_h largeur [$clog2(H):0], Phase 7 H=16/32)
 localparam CFG_HBITS   = $clog2(CFG_H);                      // 3 (largeur mh_h ; 4 pour H<=16)
 localparam CFG_DBITS   = $clog2(CFG_D);                      // 6 (index Q_packed D-byte)
 localparam CFG_KVWBITS = $clog2(CFG_KVW);                    // 5 (index gg_k/v_packed)

@@ -10,7 +10,11 @@ module gen_seq_top #(
     // mais les 16 hauts (octets 64..127) sont hors-borne = garbage (artefact de probe,
     // pas un bug de compute). DIM128/HS16_PROFILE = flags -D passés au build.
     parameter W = 8,
-`ifdef DIM128
+`ifdef DIM512
+    parameter D = 512,
+`elsif DIM256
+    parameter D = 256,
+`elsif DIM128
     parameter D = 128,
 `else
     parameter D = 64,

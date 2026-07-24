@@ -619,7 +619,7 @@ module top #(
     // ---- Q storage : D bytes packed (H heads * HS elements) ----
     reg [CFG_D*8-1:0] Q_packed;    // D bytes
     reg [CFG_D*8-1:0] Out_packed;  // D bytes
-    reg [3:0]   mh_h;        // index head courant (0..H-1 ; 4 bits couvre H<=16)
+    reg [CFG_LOG2_H:0] mh_h;        // index head courant (0..H-1 ; Phase 7 : $clog2(H):0 couvre H<=32)
     // Q_flat fourni a attention_head_op : HS bytes du head mh_h
     wire [CFG_HS*8-1:0] Q_flat = Q_packed[mh_h*(CFG_HS*8) +: CFG_HS*8];
 
@@ -906,7 +906,8 @@ module top #(
         S_FN_RDW    = 7'd100,
         S_FN_WB     = 7'd101,
         // FM (matmul y=W.x with W in SDRAM, K=64 fixe)
-        S_FM_N      = 7'd102,    // receives N
+        S_FM_N      = 7'd102,    // receives N (lo byte)
+        S_FM_N2     = 8'd255,    // receives N (hi byte) -- dim-rework Phase 7 : N sur 2 octets (D>255)
         S_FM_SX     = 7'd103,
         S_FM_SW     = 7'd104,
         S_FM_RX_X   = 7'd105,    // receives x[64]
@@ -1178,6 +1179,7 @@ module top #(
     // Pour FM / FQ (N etendu a 64 pour realistic matmul wq/wo)
     reg [$clog2(D):0]  fm_row;             // 0..N-1 (N=D)
     reg [$clog2(D):0]  fm_N;               // 1..D (output count matmul)
+    reg [7:0]          n_lo;               // dim-rework Phase 7 : N lo byte (protocole N sur 2 octets, D>255)
     reg [$clog2(D):0]  dot_k;
     reg signed [31:0] dot_acc;
     // Stockage int32 pour requantize (FQ uniquement, N <= 64)
@@ -1316,7 +1318,7 @@ module top #(
         state == S_CC_N0    || state == S_CC_N1   ||
         state == S_M2_F     || state == S_FN_SX   || state == S_FN_SW || state == S_FN_RX_X ||
         state == S_FN_A0    || state == S_FN_A1   || state == S_FN_A2 ||
-        state == S_FM_N     || state == S_FM_SX   || state == S_FM_SW || state == S_FM_RX_X ||
+        state == S_FM_N     || state == S_FM_N2   || state == S_FM_SX   || state == S_FM_SW || state == S_FM_RX_X ||
         state == S_FM_A0    || state == S_FM_A1   || state == S_FM_A2 ||
         state == S_CN_SX    || state == S_CN_SW_RMS || state == S_CN_SW_MM ||
         state == S_CN_N     || state == S_CN_RX_X ||
@@ -1807,7 +1809,10 @@ module top #(
                 end
 
                 // ---- FM (matmul y[N]=W.x with W in SDRAM) ----
-                S_FM_N:  if (rx_pending) begin fm_N <= rx_byte[$clog2(D):0]; state <= S_FM_SX; end
+                // dim-rework Phase 7 : N sur 2 octets (D>255). Nlo puis Nhi, fm_N={hi,lo}
+                // tronqué à [$clog2(D):0] (N<=D<=512 tient). Bit-identique à D<=255 (hi=0).
+                S_FM_N:  if (rx_pending) begin n_lo <= rx_byte; state <= S_FM_N2; end
+                S_FM_N2: if (rx_pending) begin fm_N <= {rx_byte, n_lo}; state <= S_FM_SX; end
                 S_FM_SX: if (rx_pending) begin rms_shift_x <= $signed(rx_byte); state <= S_FM_SW; end
                 S_FM_SW: if (rx_pending) begin rms_shift_w <= $signed(rx_byte); rx_idx <= 10'd0; state <= S_FM_RX_X; end
                 S_FM_RX_X: if (rx_pending) begin

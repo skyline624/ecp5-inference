@@ -39,7 +39,7 @@ module vec_alu2 #(
     reg signed [31:0] max_abs;
     reg signed [7:0]  base_sh, da, db_;
     reg [5:0] add_sh;
-    reg [6:0] i;                          // 0..D element index
+    reg [$clog2(D):0] i;                  // 0..D element index (etait [6:0] -> caps a 127, hang dim>=256)
     reg [2:0] fcnt;                       // DSP pipeline drain counter
     reg [2:0] ph;                         // sub-phase: 0=MUL/ADD, 1=REQ, 2=FIN
 

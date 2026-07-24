@@ -21,6 +21,8 @@ param(
     [switch]$Hs16,
     [switch]$StreamFFN,
     [switch]$Dim128,
+    [switch]$Dim256,
+    [switch]$Dim512,
     [switch]$Vocab32000,
     [int]$Ntok = 17,
     [string]$Dump = "",
@@ -35,9 +37,11 @@ $env:PERL5LIB = "$PSScriptRoot\vlib"
 Set-Location $PSScriptRoot
 
 if ($Dump -eq "") {
-    if ($Dim128)  { $Dump = "..\host\gen_model_dump_dim128.json" }
-    elseif ($Hs16) { $Dump = "..\host\gen_model_dump_hs16_rand.json" }
-    else           { $Dump = "..\host\gen_model_dump.json" }
+    if ($Dim512)     { $Dump = "..\host\gen_model_dump_dim512.json" }
+    elseif ($Dim256) { $Dump = "..\host\gen_model_dump_dim256.json" }
+    elseif ($Dim128) { $Dump = "..\host\gen_model_dump_dim128.json" }
+    elseif ($Hs16)   { $Dump = "..\host\gen_model_dump_hs16_rand.json" }
+    else             { $Dump = "..\host\gen_model_dump.json" }
 }
 $env:DUMP = $Dump
 
@@ -57,11 +61,16 @@ if (-not $SkipBuild) {
     $defs = "-DLINK_SS -DSDRAM_PRELOAD -DSIM -DFLASH_BOOT"
     if ($Hs16) { $defs += " -DHS16_PROFILE" }
     if ($StreamFFN) { $defs += " -DNC0_PROFILE" }
-    if ($Dim128) { $defs += " -DDIM128" }
+    if ($Dim512)     { $defs += " -DDIM512" }
+    elseif ($Dim256) { $defs += " -DDIM256" }
+    elseif ($Dim128) { $defs += " -DDIM128" }
     if ($Vocab32000) { $defs += " -DVOCAB32000" }
-    # C++ TB : nb de mots uint32 du port result (W*D/32). 16 dim=64, 32 dim=128.
+    # C++ TB : nb de mots uint32 du port result (W*D/32 = D/4). 16/32/64/128 pour dim 64/128/256/512.
     # Positionné AVANT le build pour que build_verilator_fb.bat (%CXXDEFS%) le voie.
-    if ($Dim128) { $env:CXXDEFS = "/DXB_WORDS=32" } else { $env:CXXDEFS = "" }
+    if ($Dim512)       { $env:CXXDEFS = "/DXB_WORDS=128" }
+    elseif ($Dim256)   { $env:CXXDEFS = "/DXB_WORDS=64" }
+    elseif ($Dim128)   { $env:CXXDEFS = "/DXB_WORDS=32" }
+    else               { $env:CXXDEFS = "" }
     $wflags = "-Wno-fatal -Wno-UNOPTFLAT -Wno-UNUSED -Wno-WIDTH -Wno-UNDRIVEN " +
               "-Wno-CASEINCOMPLETE -Wno-INITIALDLY -Wno-PINMISSING -Wno-IMPLICIT " +
               "-Wno-LITENDIAN -Wno-BLKANDNBLK -Wno-CASEX -Wno-UNOPT"
@@ -109,9 +118,14 @@ if (-not $SkipBuild) {
 # NC=0 stream SDRAM est ~3x plus lent (FFN streamé a chaque token) -> le cap cycles
 # anti-hang du TB (40M, calibré NC=5) déborde avant 17 tokens. On lève le cap via env.
 # Dim128 = profile DIM128 -> CFG_NC=0 automatique (stream) -> cap élevé aussi.
-if ($StreamFFN -or $Dim128) { $env:SIM_CYCLE_CAP = "260000000" }  # dim128 NC=0 stream ~10M cyc/tok -> 17 tokens ~170M+margin
+# Dim128/256/512 = NC=0 stream automatique -> cap élevé. Cyc/tok croît avec D
+# (matvec D^2, SDRAM-bound) : dim128 ~10M, dim256 ~37M/tok (17 tok ~630M, cap 800M),
+# dim512 ~150M/tok (cap 2000M, valider sur Ntok reduit -- 17 tok ~2.5B impraticable).
+if ($Dim512)            { $env:SIM_CYCLE_CAP = "2000000000" }
+elseif ($Dim256)        { $env:SIM_CYCLE_CAP = "800000000" }
+elseif ($StreamFFN -or $Dim128) { $env:SIM_CYCLE_CAP = "260000000" }
 else            { $env:SIM_CYCLE_CAP = "" }   # défaut TB 40M
-Write-Host "==> run tb_verilator.exe (NTOK=$Ntok, HS16=$Hs16, StreamFFN=$StreamFFN, Dim128=$Dim128)" -ForegroundColor Cyan
+Write-Host "==> run tb_verilator.exe (NTOK=$Ntok, HS16=$Hs16, StreamFFN=$StreamFFN, Dim128=$Dim128, Dim256=$Dim256, Dim512=$Dim512)" -ForegroundColor Cyan
 $sw3 = [System.Diagnostics.Stopwatch]::StartNew()
 $out = & ".\vobj\tb_verilator.exe" 2>&1
 $rc = $LASTEXITCODE
