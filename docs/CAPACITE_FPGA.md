@@ -102,6 +102,10 @@ grossit encore (4-16 Mo). Le cluster distribue poids+KV+compute sur plusieurs pu
 > n'est PAS atteignable juste en « ajoutant des nœuds » — les deux murs (LUT par
 > nœud, SDRAM par nœud) demandent du travail architectural au-delà du placeholder
 > actuel. Single-FPGA validé : **dim=128**. dim=256/512 = cluster + rework.
+>
+> → **Approche cluster détaillée dans `docs/CLUSTER_DIM_SHARDING.md`** (méthode
+> tensor-parallel, ratio compute/comm favorable, infra ss_link/ring_cluster
+> existante, rework à faire, ordre suggéré).
 
 ## Preuve bit-exact par palier (Phase 7c)
 
