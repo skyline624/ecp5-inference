@@ -81,9 +81,9 @@ int main(int argc, char** argv) {
         tick(); wd++;
         uint8_t tv = top->token_valid & 1;
         if (tv && !tv_d) {
-            int tok = (int)(top->token & 0x3FF);
+            int tok = (int)(top->token & 0xFFFF);      // TBITS=16 (vocab-param Phase 6)
             int bv = (int)(top->dbg_best_v & 0xFFFFFFFF);
-            int bi = (int)(top->dbg_best_i & 0x3FF);
+            int bi = (int)(top->dbg_best_i & 0xFFFF);   // couvre VOCAB<=65536 (32000)
             int sh = (int)(top->result_sh & 0xFF);
             // XB (result) : 32 mots uint32 little-endian par octet (match oracle diag)
             char hexbuf[XB_WORDS*9+1]; hexbuf[0]=0;

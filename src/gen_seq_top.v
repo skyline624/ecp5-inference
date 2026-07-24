@@ -24,14 +24,15 @@ module gen_seq_top #(
     input  wire [NL*8-1:0] sw_rmsf, sw1, sw3, sw2,
     input  wire signed [7:0] sw_rmsfinal, sw_emb,
     input  wire [5:0]     pos,
-    // prefill : prompt token IDs (packed, NPR*10 bits) + count. prompt_len=0 -> BOS
-    // hardcodé côté gen_seq. Exposé ici pour piloter le token initial en gen_mode
+    // prefill : prompt token IDs (packed, NPR*TBITS = 16*16 bits) + count. prompt_len=0
+    // -> BOS hardcodé côté gen_seq. Exposé ici pour piloter le token initial en gen_mode
     // (test_gen_A et tests de prefill) ; génère à partir du dernier token du prompt.
-    input  wire [16*10-1:0] prompt,
+    // TBITS=16 (vocab-paramétrable Phase 6, couvre VOCAB <= 65536) côté gen_seq.
+    input  wire [16*16-1:0] prompt,
     input  wire [6:0]        prompt_len,
     output wire [W*D-1:0] result,
     output wire signed [7:0] result_sh,
-    output wire [9:0]     token,
+    output wire [15:0]    token,
     output wire           token_valid,
     output wire           done,
 `ifdef SIM
@@ -40,7 +41,7 @@ module gen_seq_top #(
     output wire [11:0]   dbg_idx,          // debug SIM-only : gen_seq idx (octet paquet / rcnt)
     output wire [8:0]    dbg_node_state,   // debug SIM-only : node FSM state (localise hang)
     output wire [31:0]   dbg_best_v,       // debug SIM-only : argmax best_val final (v du token émis)
-    output wire [9:0]    dbg_best_i,       // debug SIM-only : argmax best_idx final (= token émis)
+    output wire [15:0]   dbg_best_i,       // debug SIM-only : argmax best_idx final (= token émis)
 `endif
     // sonde sim-only : cache FFN BRAM rempli (path silicium FLASH_BOOT). Permet au
     // TB Verilog pur / au TB C++ Verilator d'attendre le fill SANS ref hierarchique
@@ -90,7 +91,7 @@ module gen_seq_top #(
     wire [11:0] dbg_idx_w;                            // debug : gen_seq idx
     wire [8:0] dbg_node_state_w;                      // debug : node FSM state
     wire [31:0] dbg_best_v_w;                         // debug : argmax best_val final
-    wire [9:0]  dbg_best_i_w;                         // debug : argmax best_idx final
+    wire [15:0]  dbg_best_i_w;                         // debug : argmax best_idx final
     assign dbg_st = dbg_st_w;                         // sonde SIM-only (localise hang)
     assign dbg_phase = dbg_phase_w;
     assign dbg_idx = dbg_idx_w;

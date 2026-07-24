@@ -21,9 +21,11 @@ param(
     [switch]$Hs16,
     [switch]$StreamFFN,
     [switch]$Dim128,
+    [switch]$Vocab32000,
     [int]$Ntok = 17,
     [string]$Dump = "",
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$CompileOnly
 )
 
 . C:\oss-cad-suite\environment.ps1
@@ -56,6 +58,7 @@ if (-not $SkipBuild) {
     if ($Hs16) { $defs += " -DHS16_PROFILE" }
     if ($StreamFFN) { $defs += " -DNC0_PROFILE" }
     if ($Dim128) { $defs += " -DDIM128" }
+    if ($Vocab32000) { $defs += " -DVOCAB32000" }
     # C++ TB : nb de mots uint32 du port result (W*D/32). 16 dim=64, 32 dim=128.
     # Positionné AVANT le build pour que build_verilator_fb.bat (%CXXDEFS%) le voie.
     if ($Dim128) { $env:CXXDEFS = "/DXB_WORDS=32" } else { $env:CXXDEFS = "" }
@@ -91,6 +94,8 @@ if (-not $SkipBuild) {
     if ($vrc -ne 0) { Get-Content vobj_vlog.txt | Select-Object -Last 20; throw "verilator --cc failed (exit $vrc)" }
     Get-Content vobj_vlog.txt | Select-Object -Last 2
     $sw.Stop(); Write-Host ("  verilator: {0:N1}s" -f $sw.Elapsed.TotalSeconds) -ForegroundColor DarkGray
+
+    if ($CompileOnly) { Write-Host "==> compile-only OK (skip build/run)" -ForegroundColor Green; return }
 
     # ---- build MSVC (cl.exe via vcvars64) ----
     Write-Host "==> build MSVC (cl.exe /O2)" -ForegroundColor Cyan

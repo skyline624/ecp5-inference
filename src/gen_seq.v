@@ -64,7 +64,7 @@ module gen_seq #(
     input  wire [5:0]      pos,           // single-shot mode : fixed position
     input  wire [22:0]     base,
     // prefill : prompt token IDs (packed) + count. prompt_len=0 -> BOS hardcodé (backward compat).
-    input  wire [NPR*10-1:0] prompt,
+    input  wire [NPR*TBITS-1:0] prompt,
     input  wire [6:0]        prompt_len,
     output wire [7:0]      lk_cmd_data,
     output wire            lk_cmd_wr,
@@ -74,7 +74,7 @@ module gen_seq #(
     output wire            lk_resp_rd,
     output reg  [W*D-1:0]  result,        // XB after the 5 layers (captured before lm_head)
     output reg  signed [7:0] result_sh,
-    output reg  [9:0]      token,         // argmax of the lm_head logits (= token_out)
+    output reg  [TBITS-1:0] token,         // argmax of the lm_head logits (= token_out)
     output reg             token_valid,   // 1-cycle pulse when a token is emitted (gen mode)
     output reg             done,
 `ifdef SIM
@@ -82,7 +82,7 @@ module gen_seq #(
     output [3:0]          dbg_phase,       // debug SIM-only : phase courante (PH_*)
     output [11:0]         dbg_idx,         // debug SIM-only : idx octet paquet / rcnt recv
     output [31:0]         dbg_best_v,      // debug SIM-only : argmax best_val final (v du token émis)
-    output [9:0]          dbg_best_i,      // debug SIM-only : argmax best_idx final (= token émis)
+    output [TBITS-1:0]    dbg_best_i,      // debug SIM-only : argmax best_idx final (= token émis)
 `endif
     // ---- KV cache maître SDRAM direct (étape 1 KV→SDRAM, plan §2.2) ----
     // kmem/vmem (BRAM 10 Ko, 6 DP16KD) déplacés en SDRAM @ KV_BASE. ksh/vsh
@@ -115,6 +115,13 @@ module gen_seq #(
     localparam NCHUNK_F= HIDPAD/D;        // 3 pour stories260K
     localparam SW = 3;
     localparam AW = SW + $clog2(D);
+    // vocab-paramétrable (Phase 6) : TBITS = largeur token, 16 bits fixe couvre
+    // VOCAB <= 65536 (cible 32000 = 15 bits). Bit-identique à vocab=512 car les bits
+    // hauts sont 0 (token <= 511) -> hi-byte [15:8] == ancien {6'd0,[9:8]} là-bas.
+    // LBITS = $clog2(NCHUNK) pour lmchunk/scan_c (NCHUNK jusqu'à 500 à vocab=32000/dim=64).
+    // NCHUNK=ceil(VOCAB/D) côté model_cfg.vh (integer à tous les paliers sauf dim=512).
+    localparam TBITS = 16;
+    localparam LBITS = $clog2(NCHUNK);
     // Session 6b lever #2 (vfile fusion SB_P->SB_Vc, 8->7 slots) was tried and REVERTED :
     // it cut cell count (Logic -411, SSRAM -48) but WORSENED routing (789->931 unrouted)
     // by concentrating V/P accesses into one congested distributed-RAM hotspot. The node
@@ -147,11 +154,11 @@ module gen_seq #(
     (* ram_style = "block" *) reg signed [7:0] logits [0:VOCAB-1];
     reg signed [7:0] lraw;                    // registered logits[amax_i] (BSRAM read)
     reg signed [7:0] csh [0:NCHUNK-1];
-    reg [3:0] lmchunk;                       // lm_head tok_emb chunk 0..NCHUNK-1
+    reg [LBITS:0] lmchunk;                   // lm_head tok_emb chunk 0..NCHUNK-1
     reg signed [7:0] sref_lm;                // max chunk shift (argmax re-align)
     reg signed [31:0] best_val;
-    reg [9:0] amax_i, best_idx;
-    reg [3:0] scan_c;
+    reg [TBITS-1:0] amax_i, best_idx;
+    reg [LBITS:0] scan_c;
 
     // ---- ss_link byte adapters ----
     reg  [7:0] tx_data; reg tx_send; wire tx_busy;
@@ -187,7 +194,7 @@ module gen_seq #(
     // stale value contaminates the per-chunk output shift, and W2 cols HID..HIDPAD-1 are 0.
     reg [2:0] layer;                         // current transformer layer 0..NL-1
     wire [22:0] base_l = base + LBASE + layer*LSTRIDE;   // = base + LBASE + layer*LSTRIDE
-    reg [9:0] cur_tok;                       // current token fed to EMBED (gen mode)
+    reg [TBITS-1:0] cur_tok;                 // current token fed to EMBED (gen mode)
     reg [5:0] pos_reg;                       // effective position (internal counter in gen mode)
     // prefill : prompt_len tokens ingérés sans émission (embed+KVWR), puis émission au
     // dernier token du prompt = premier token généré. prefill_left = tokens prompt
@@ -338,7 +345,7 @@ module gen_seq #(
             st<=IDLE; done<=0; tx_send<=0; idx<=0; rcnt<=0; bcnt<=0; phase<=PH_FN;
             ldi<=0; vwe<=0; hidx<=0; mmp<=0; mmo<=0; mmv<=0; rcp<=0; rope_rd<=0;
             alu_start<=0; fc<=0; in_ffn<=0; layer<=0; token<=0;
-            cur_tok<=10'd1; pos_reg<=6'd0; token_valid<=1'b0;
+            cur_tok<=16'd1; pos_reg<=6'd0; token_valid<=1'b0;
             prefill_left<=7'd0; prompt_idx<=5'd0;
             kv_rd<=0; kv_wr<=0; kv_addr<=0; kv_din<=0; kv_refresh<=0; kv_refresh_ret<=0;
         end else begin
@@ -353,11 +360,11 @@ module gen_seq #(
                         fc<=0; in_ffn<=0; layer<=0; bcnt<=0; ldi<=0;
                         if (prompt_len != 7'd0) begin
                             // prefill : embed the first prompt token, no emission until the last one
-                            cur_tok      <= prompt[0*10 +: 10];
+                            cur_tok      <= prompt[0*TBITS +: TBITS];
                             prefill_left <= prompt_len - 7'd1;
                             prompt_idx   <= 5'd1;
                         end else begin
-                            cur_tok      <= 10'd1;            // BOS hardcodé (backward compat)
+                            cur_tok      <= 16'd1;            // BOS hardcodé (backward compat)
                             prefill_left <= 7'd0;
                             prompt_idx   <= 5'd0;
                         end
@@ -428,7 +435,7 @@ module gen_seq #(
                             pkt[5+D]<=a0(waddr);pkt[5+D+1]<=a1(waddr);pkt[5+D+2]<=a2(waddr);
                             pkt_len<=8+D; resp_len<=3+D; src_slot<=SB_XN; Nfq<=D; end
                         PH_EE: begin   // embedding lookup : EE(cur_tok) -> XB (resp 'E''K' x[D])
-                            pkt[0]<="E";pkt[1]<="E";pkt[2]<=cur_tok[7:0];pkt[3]<={6'd0,cur_tok[9:8]};
+                            pkt[0]<="E";pkt[1]<="E";pkt[2]<=cur_tok[7:0];pkt[3]<=cur_tok[TBITS-1:8];
                             pkt_len<=4; resp_len<=2+D; src_slot<=SB_XB; dst_slot<=SB_XB; Nfq<=D; end
                         default: begin // PH_FW2 : W2_chunk(HG) -> P (SB_P), N_out=64
                             waddr = base_l + OFF_W2 + fc*(D*D);
@@ -523,8 +530,12 @@ module gen_seq #(
                     else if (phase==PH_SS && rcnt>=6 && rcnt<6+D) begin vaddr<=vidx(dst_slot, rcnt-6); vdin<=rx_data; vwe<=1'b1; end
                     else if (phase==PH_MM && rcnt>=3 && rcnt<3+D) begin vaddr<=vidx(SB_ATT, rcnt-3); vdin<=rx_data; vwe<=1'b1; end
                     else if (phase==PH_EE && rcnt>=2 && rcnt<2+D) begin vaddr<=vidx(SB_XB, rcnt-2); vdin<=rx_data; vwe<=1'b1; end
-                    // lm_head chunk logits go to the separate logits[] array (not vfile)
-                    if (phase==PH_LM && rcnt>=3 && rcnt<3+D) logits[lmchunk*D + (rcnt-3)] <= $signed(rx_data);
+                    // lm_head chunk logits go to the separate logits[] array (not vfile).
+                    // Guard < VOCAB : au dernier chunk partiel (VOCAB%D != 0, ex dim=512/vocab=32000)
+                    // on ne doit pas écrire au-delà de VOCAB-1. No-op quand VOCAB%D==0 (tous paliers
+                    // dim 64/128/256 + vocab 32000 -> NCHUNK entier, lmchunk*D+D-1 <= VOCAB-1).
+                    if (phase==PH_LM && rcnt>=3 && rcnt<3+D && (lmchunk*D + (rcnt-3) < VOCAB))
+                        logits[lmchunk*D + (rcnt-3)] <= $signed(rx_data);
                     case (phase)
                         PH_FN:  if (rcnt==2) sxn<=$signed(rx_data);
                         PH_WQ:  if (rcnt==2) sQ<=$signed(rx_data);

@@ -42,12 +42,12 @@ module tb_gen_seq_top_fb;
     reg [CFG_NL*8-1:0]  sw_rmsf=0, sw1=0, sw3=0, sw2=0;
     reg signed [7:0] sw_rmsfinal=0, sw_emb=0;
     reg [5:0]       pos = 0;
-    reg [16*10-1:0] prompt = 0;
+    reg [16*16-1:0] prompt = 0;
     reg [6:0]       prompt_len = 0;
 
     wire [W*CFG_D-1:0]    result;
     wire signed [7:0] result_sh;
-    wire [9:0]       token;
+    wire [15:0]      token;
     wire             token_valid, done;
     wire             sim_fill_done;
 
@@ -66,7 +66,7 @@ module tb_gen_seq_top_fb;
     // ---- entrees hex ----
     reg [31:0]      meta_mem [0:0];
     reg [CFG_NL*8-1:0]  shifts_mem [0:10];
-    reg [9:0]       expect_tok [0:63];
+    reg [15:0]      expect_tok [0:63];
     integer NTOK;
     integer got_count;
     integer mismatch;

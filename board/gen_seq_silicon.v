@@ -79,9 +79,10 @@ module gen_seq_silicon #(
     reg signed [7:0] sw_rmsfinal, sw_emb;
 
     // ---- Prompt register file (loaded by `PR`, fed to gen_seq at GO) ----
-    // prompt_tokens = NPR packed 10-bit token IDs (lo-first over UART : t_lo then t_hi).
+    // prompt_tokens = NPR packed 16-bit token IDs (TBITS=16, vocab-paramétrable Phase 6,
+    // couvre VOCAB <= 65536). lo-first over UART : t_lo then t_hi (2 bytes/token).
     // prompt_len=0 at reset -> gen_seq uses its hardcodé BOS (backward compat, étape 2).
-    reg [NPR*10-1:0] prompt_tokens;
+    reg [NPR*16-1:0] prompt_tokens;
     reg [6:0]        prompt_len;
     reg [4:0]        prompt_idx;   // next token slot during PR ingest
     reg [7:0]        pr_lo;        // low byte held between the lo/hi pair
@@ -117,7 +118,7 @@ module gen_seq_silicon #(
     // ---- gen_seq <-> node link (mirrors gen_seq_top) ----
     wire [7:0] s_cmd_data;  wire s_cmd_wr;
     wire [7:0] s_resp_data; wire s_resp_rd;
-    wire [9:0] token;  wire token_valid;  wire done;
+    wire [15:0] token;  wire token_valid;  wire done;
     wire [W*CFG_D-1:0] result;  wire signed [7:0] result_sh;
 
     // clk_sys = node system clock (PLL output, 31.25 MHz). The host FSM + UART + gen_seq
@@ -280,7 +281,7 @@ module gen_seq_silicon #(
             fwd_op1 <= 8'd0; fwd_idx <= 4'd0; cc_n0 <= 8'd0;
             sw_rms<=0; swq<=0; swk<=0; swv<=0; swo<=0;
             sw_rmsf<=0; sw1<=0; sw3<=0; sw2<=0; sw_rmsfinal<=8'sd0; sw_emb<=8'sd0;
-            prompt_len<=7'd0; prompt_idx<=5'd0; prompt_tokens<={NPR*10{1'b0}}; pr_lo<=8'd0;
+            prompt_len<=7'd0; prompt_idx<=5'd0; prompt_tokens<={NPR*16{1'b0}}; pr_lo<=8'd0;
 `ifdef FLASH_BOOT
             shifts_latched <= 1'b0;
 `endif
@@ -426,7 +427,7 @@ module gen_seq_silicon #(
                 H_PRDATA: if (rx_valid) begin
                     if (sh_cnt[0]==1'b0) pr_lo <= rx_byte;
                     else begin
-                        prompt_tokens[prompt_idx*10 +: 10] <= {rx_byte[1:0], pr_lo};
+                        prompt_tokens[prompt_idx*16 +: 16] <= {rx_byte, pr_lo};
                         prompt_idx <= prompt_idx + 5'd1;
                     end
                     if (sh_cnt == ({prompt_len,1'b0} - 7'd1)) begin   // 2*prompt_len-1 = last hi byte
@@ -456,7 +457,7 @@ module gen_seq_silicon #(
     // are back-to-back, so the 2nd must wait for the 1st frame to finish.
     localparam TP_IDLE=3'd0, TP_S0=3'd1, TP_WB0=3'd2, TP_WD0=3'd3, TP_S1=3'd4, TP_WB1=3'd5, TP_WD1=3'd6;
     reg [2:0] tp_state = TP_IDLE;
-    reg [9:0] tok_hold;
+    reg [15:0] tok_hold;
     reg [7:0] t_tx_data;  reg t_tx_send;
     always @(posedge clk) begin
         if (!rst_n || !run_mode) begin tp_state <= TP_IDLE; t_tx_send <= 1'b0; t_tx_data <= 8'd0; end
@@ -467,7 +468,7 @@ module gen_seq_silicon #(
                 TP_S0:   begin t_tx_data <= tok_hold[7:0];      t_tx_send <= 1'b1; tp_state <= TP_WB0; end
                 TP_WB0:  if (tx_busy) tp_state <= TP_WD0;       // wait for send to start
                 TP_WD0:  if (~tx_busy) tp_state <= TP_S1;        // wait for frame to finish
-                TP_S1:   begin t_tx_data <= {6'b0, tok_hold[9:8]}; t_tx_send <= 1'b1; tp_state <= TP_WB1; end
+                TP_S1:   begin t_tx_data <= tok_hold[15:8]; t_tx_send <= 1'b1; tp_state <= TP_WB1; end
                 TP_WB1:  if (tx_busy) tp_state <= TP_WD1;
                 TP_WD1:  if (~tx_busy) tp_state <= TP_IDLE;
                 default: tp_state <= TP_IDLE;

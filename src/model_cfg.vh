@@ -69,7 +69,16 @@ localparam CFG_SCORE_SH = 0;  // pre-shift score (0 = comportement historique HS
 `endif
 `endif
 localparam CFG_NL   = 5;      // n_layers
-localparam CFG_VOCAB= 512;
+// vocab paramétrable (Phase 6) : CFG_VOCAB surchargeable via `VOCAB32000 (cible
+// tinyllamas). Défaut 512 = stories260K (non-régression). La table d'embedding
+// SDRAM (VOCAB*D) et le scan argmax (VOCAB cycles/token) passent à 32000 -> SDRAM
+// ~4 Mo à dim=128 (déborde la i9, faut carte custom/cluster) + argmax ~62x plus
+// lent. RTL: token TBITS=16 bits, NCHUNK=ceil(VOCAB/D) (500/250/125 à dim 64/128/256).
+`ifdef VOCAB32000
+localparam CFG_VOCAB = 32000;
+`else
+localparam CFG_VOCAB = 512;
+`endif
 localparam CFG_NN   = 1;      // tensor-parallel degree (première livraison : single-node)
 
 // --- dérivés HS/head-shape (retire les magic numbers 8/4/32/64 du datapath attention) ---
@@ -84,7 +93,11 @@ localparam CFG_DBITS   = $clog2(CFG_D);                      // 6 (index Q_packe
 localparam CFG_KVWBITS = $clog2(CFG_KVW);                    // 5 (index gg_k/v_packed)
 localparam CFG_NPOS    = 17;                                 // generation length (token loop)
 localparam CFG_TMAX    = 32;                                 // max sequence length (attention T)
-localparam CFG_NCHUNK  = CFG_VOCAB/CFG_D;                    // 8 (lm_head chunks)
+localparam CFG_NCHUNK  = (CFG_VOCAB + CFG_D - 1)/CFG_D;      // ceil(VOCAB/D) lm_head chunks
+   // (Phase 6 vocab-paramétrable : ceil au lieu de floor -> évite la troncature
+   //  silencieuse de logits quand VOCAB%D != 0, ex dim=512/vocab=32000 = 62.5.
+   //  Integer à tous les paliers dim 64/128/256 avec vocab=32000 : 500/250/125.
+   //  lmchunk/scan_c largeur $clog2(CFG_NCHUNK):0 côté gen_seq.)
 localparam CFG_NPR     = 16;                                 // max prompt tokens (prefill)
 // FFN layout : HID padded au multiple de D supérieur, chunké en blocs [D,D]
 // (cohérent avec gen_seq.v "HID chunked 3x64" : 172 -> 192 = 3*64).
