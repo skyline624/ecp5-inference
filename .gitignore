@@ -29,6 +29,16 @@ build/sim_build/
 # build_msvc.bat / patch_harness.py / run_verilator.bat sont des sources (racine sim/).
 sim/obj_dir/
 
+# ---- Verilator fast-sim build dir (regenerable : Vtop*.cpp/.obj, tb_verilator.exe) ----
+# Flow Verilator untimed (cf sim/VERILATOR_FAST_SIM.md) : run_verilator_fb.ps1
+# build dans sim/vobj/. Scripts .cpp/.ps1/.bat/.v/.md sont des sources (racine sim/).
+sim/vobj/
+
+# ---- dump copies utilisées par les sims (regenerables depuis host/) ----
+# Les sims pointent sur les dumps host/ via DUMP=... ; ces copies sim/ sont des
+# artefacts de run local (ex: gen_model_dump_hs16.json = copie du host/).
+sim/gen_model_dump_hs16.json
+
 # ---- JSON synth reports (regenerable) ----
 # build/*.json sont des sorties nextpnr/yosys ; mais on ignore sélectivement :
 build/*.json
@@ -58,3 +68,16 @@ web/dist/
 server/_work/
 server/vcd/*.vcd
 server/vcd/*.index.json
+
+# ---- rework dim-paramétrable : artefacts de debug / dump dim128 ----
+# Dumps synthétiques dim128 (regénérables via host/gen_synthetic_dim.py).
+host/gen_model_dump_dim*.json
+# Captures sim/oracle/rtl utilisées pour le debug du drift dim128 (sorties .txt).
+host/*_xb.txt
+host/oracle_*_xb.txt
+host/sim_*.txt
+host/rtl_xb.txt
+sim/sim_*.txt
+sim/oracle_*.txt
+sim/vobj_vlog.txt
+sim/vtest.txt

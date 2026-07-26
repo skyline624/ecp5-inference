@@ -27,14 +27,15 @@ N_TOK = 17
 NL = 5  # n_layers (stories260K)
 
 # Oracle = tokens GENERES par le silicium (le 1er token genere est tok 0 = 403 = BOS
-# embed lookup). Valide sur silicium 23 juil 2026 (build NODE_ONLY+FLASH_BOOT, RTL
-# actuel) : 17 tokens, tok 0..9 = [403,407,261,378,432,383,286,261,376,298] bit-exact
-# vs sim mock test_gen_F_fb. ATTENTION tok 9 = 298 (le knife-edge 268/298 bascule a 298
-# sur silicium = sim mock ; l'oracle prove_gen_node.py predit 268 a tort, gap de
-# modelisation Python ~15 unites XN non masque au gap-0). L'ancienne liste [1, 403, ...]
-# incluait le BOS=1 a l'index 0 -> comparaison decalee de 1 vs tokens[] (commence au
-# 1er token genere) -> faux FAIL. Tokens GENERES seulement ici (pas de BOS).
-ORACLE = [403, 407, 261, 378, 432, 383, 286, 261, 376, 298, 276, 364, 280, 323, 417, 427, 303]
+# embed lookup). Valide sur silicium 24 juil 2026 (build NODE_ONLY+FLASH_BOOT+CLUSTER_NODE,
+# RTL avec le fix dot stale = zero mac_a/mac_b au cycle mac_load/dot_k==0) : 17/17 bit-exact
+# vs node_tokens (sim Verilator + iverilog + cocotb). Le fix dot a RESOLU le drift tok9
+# (298 -> 268) ET le gap KV tok10+ (divergence 276,364,280,323,417,427,303 eliminee) :
+# le terme stale xbuf[65]*wbuf[65] au cycle de load corrompait les dots wo/L1+ et poussait
+# tok9 au knife-edge 298. L'oracle prove_gen_node (268) avait RAISON depuis le debut.
+# ANCIEN oracle (pre-fix, stale) : [403,407,261,378,432,383,286,261,376,298,276,364,280,323,417,427,303].
+# Tokens GENERES seulement ici (pas de BOS).
+ORACLE = [403, 407, 261, 378, 432, 383, 286, 261, 376, 268, 414, 421, 303, 428, 415, 412, 264]
 
 
 def sh_packet(w):

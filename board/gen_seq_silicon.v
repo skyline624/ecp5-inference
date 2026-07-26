@@ -27,7 +27,7 @@
 //                       each token_valid packs 2 bytes to uart_tx. Host is read-only.
 // =============================================================================
 module gen_seq_silicon #(
-    parameter W = 8, parameter D = 64, parameter NL = 5, parameter NPOS = 17,
+    parameter W = 8,
     parameter NPR = 16        // max prompt tokens for prefill (PR opcode)
 ) (
     input  wire           clk,                 // 25 MHz, pin P3
@@ -52,9 +52,9 @@ module gen_seq_silicon #(
 `endif
 );
     `include "model_cfg.vh"
-    // gen_seq shape from model_cfg.vh (source unique) : HID/LSTRIDE/OFF_*/LBASE.
-    // D/NL/NPOS/NPR restent des parameter (defaults dim 64 = CFG_). Pour dim 128+ :
-    // surcharger ces parameter ET éditer model_cfg.vh ensemble (TODO unification).
+    // gen_seq shape from model_cfg.vh (source unique) : D/HID/NL/NPOS/HS/H/KH/...
+    // Tous passés via CFG_* (rework dim Phase 1 : .D(CFG_D), .NL(CFG_NL), .NPOS(CFG_NPOS)).
+    // dim paramétrable : `DIM128 active CFG_D=128/HS=16/NC=0 stream (cf model_cfg.vh).
 
     // ---- Power-on reset (raw clk domain; the node has its own internal POR) ----
     // Counter saturates at 0xFFFF so rst_n = por[15] rises once and STAYS high.
@@ -75,13 +75,14 @@ module gen_seq_silicon #(
         .clk(clk), .rst(uart_rst), .data(tx_data_w), .send(tx_send_w), .tx(uart_tx), .busy(tx_busy));
 
     // ---- Shift register file (47 bytes loaded by `SH`, held for the whole run) ----
-    reg [NL*8-1:0] sw_rms, swq, swk, swv, swo, sw_rmsf, sw1, sw3, sw2;
+    reg [CFG_NL*8-1:0] sw_rms, swq, swk, swv, swo, sw_rmsf, sw1, sw3, sw2;
     reg signed [7:0] sw_rmsfinal, sw_emb;
 
     // ---- Prompt register file (loaded by `PR`, fed to gen_seq at GO) ----
-    // prompt_tokens = NPR packed 10-bit token IDs (lo-first over UART : t_lo then t_hi).
+    // prompt_tokens = NPR packed 16-bit token IDs (TBITS=16, vocab-paramétrable Phase 6,
+    // couvre VOCAB <= 65536). lo-first over UART : t_lo then t_hi (2 bytes/token).
     // prompt_len=0 at reset -> gen_seq uses its hardcodé BOS (backward compat, étape 2).
-    reg [NPR*10-1:0] prompt_tokens;
+    reg [NPR*16-1:0] prompt_tokens;
     reg [6:0]        prompt_len;
     reg [4:0]        prompt_idx;   // next token slot during PR ingest
     reg [7:0]        pr_lo;        // low byte held between the lo/hi pair
@@ -117,8 +118,8 @@ module gen_seq_silicon #(
     // ---- gen_seq <-> node link (mirrors gen_seq_top) ----
     wire [7:0] s_cmd_data;  wire s_cmd_wr;
     wire [7:0] s_resp_data; wire s_resp_rd;
-    wire [9:0] token;  wire token_valid;  wire done;
-    wire [W*D-1:0] result;  wire signed [7:0] result_sh;
+    wire [15:0] token;  wire token_valid;  wire done;
+    wire [W*CFG_D-1:0] result;  wire signed [7:0] result_sh;
 
     // clk_sys = node system clock (PLL output, 31.25 MHz). The host FSM + UART + gen_seq
     // run on `clk` (25 MHz crystal); the compute node runs on clk_sys. The two async_fifo
@@ -164,11 +165,16 @@ module gen_seq_silicon #(
     wire [22:0] n_kv_addr;  wire n_kv_rd, n_kv_wr;  wire [7:0] n_kv_din;
     wire        n_kv_refresh; wire [7:0] n_sd_dout;  wire n_sd_busy;
 
-    gen_seq #(.W(W), .D(D), .NL(NL), .NPOS(NPOS), .NPR(NPR),
+    gen_seq #(.W(W), .D(CFG_D), .NL(CFG_NL), .NPOS(CFG_NPOS), .NPR(NPR),
+              .H(CFG_H), .KH(CFG_KH), .HS(CFG_HS),
+              .VOCAB(CFG_VOCAB), .NCHUNK(CFG_NCHUNK), .TMAX(CFG_TMAX),
               .HID(CFG_HID), .LSTRIDE(CFG_LSTRIDE), .LBASE(CFG_LBASE),
-              .OFF_W1(CFG_OFF_W1), .OFF_W3(CFG_OFF_W3), .OFF_W2(CFG_OFF_W2)) u_seq (
+              .OFF_RMS(CFG_OFF_RMS), .OFF_WQ(CFG_OFF_WQ), .OFF_WK(CFG_OFF_WK),
+              .OFF_WV(CFG_OFF_WV), .OFF_WO(CFG_OFF_WO), .OFF_RMSFF(CFG_OFF_RMSFF),
+              .OFF_W1(CFG_OFF_W1), .OFF_W3(CFG_OFF_W3), .OFF_W2(CFG_OFF_W2),
+              .A_RMSFINAL(CFG_A_RMSFINAL), .A_EMB(CFG_A_EMB), .KV_BASE(CFG_KV_BASE)) u_seq (
         .clk(clk), .rst_n(rst_n & seq_rst_n), .start(start_pulse), .gen_mode(1'b1),
-        .x_in({W*D{1'b0}}), .sx_in(8'sd0),
+        .x_in({W*CFG_D{1'b0}}), .sx_in(8'sd0),
         .sw_rms(sw_rms), .swq(swq), .swk(swk), .swv(swv), .swo(swo),
         .sw_rmsf(sw_rmsf), .sw1(sw1), .sw3(sw3), .sw2(sw2),
         .sw_rmsfinal(sw_rmsfinal), .sw_emb(sw_emb),
@@ -275,7 +281,7 @@ module gen_seq_silicon #(
             fwd_op1 <= 8'd0; fwd_idx <= 4'd0; cc_n0 <= 8'd0;
             sw_rms<=0; swq<=0; swk<=0; swv<=0; swo<=0;
             sw_rmsf<=0; sw1<=0; sw3<=0; sw2<=0; sw_rmsfinal<=8'sd0; sw_emb<=8'sd0;
-            prompt_len<=7'd0; prompt_idx<=5'd0; prompt_tokens<={NPR*10{1'b0}}; pr_lo<=8'd0;
+            prompt_len<=7'd0; prompt_idx<=5'd0; prompt_tokens<={NPR*16{1'b0}}; pr_lo<=8'd0;
 `ifdef FLASH_BOOT
             shifts_latched <= 1'b0;
 `endif
@@ -421,7 +427,7 @@ module gen_seq_silicon #(
                 H_PRDATA: if (rx_valid) begin
                     if (sh_cnt[0]==1'b0) pr_lo <= rx_byte;
                     else begin
-                        prompt_tokens[prompt_idx*10 +: 10] <= {rx_byte[1:0], pr_lo};
+                        prompt_tokens[prompt_idx*16 +: 16] <= {rx_byte, pr_lo};
                         prompt_idx <= prompt_idx + 5'd1;
                     end
                     if (sh_cnt == ({prompt_len,1'b0} - 7'd1)) begin   // 2*prompt_len-1 = last hi byte
@@ -451,7 +457,7 @@ module gen_seq_silicon #(
     // are back-to-back, so the 2nd must wait for the 1st frame to finish.
     localparam TP_IDLE=3'd0, TP_S0=3'd1, TP_WB0=3'd2, TP_WD0=3'd3, TP_S1=3'd4, TP_WB1=3'd5, TP_WD1=3'd6;
     reg [2:0] tp_state = TP_IDLE;
-    reg [9:0] tok_hold;
+    reg [15:0] tok_hold;
     reg [7:0] t_tx_data;  reg t_tx_send;
     always @(posedge clk) begin
         if (!rst_n || !run_mode) begin tp_state <= TP_IDLE; t_tx_send <= 1'b0; t_tx_data <= 8'd0; end
@@ -462,7 +468,7 @@ module gen_seq_silicon #(
                 TP_S0:   begin t_tx_data <= tok_hold[7:0];      t_tx_send <= 1'b1; tp_state <= TP_WB0; end
                 TP_WB0:  if (tx_busy) tp_state <= TP_WD0;       // wait for send to start
                 TP_WD0:  if (~tx_busy) tp_state <= TP_S1;        // wait for frame to finish
-                TP_S1:   begin t_tx_data <= {6'b0, tok_hold[9:8]}; t_tx_send <= 1'b1; tp_state <= TP_WB1; end
+                TP_S1:   begin t_tx_data <= tok_hold[15:8]; t_tx_send <= 1'b1; tp_state <= TP_WB1; end
                 TP_WB1:  if (tx_busy) tp_state <= TP_WD1;
                 TP_WD1:  if (~tx_busy) tp_state <= TP_IDLE;
                 default: tp_state <= TP_IDLE;

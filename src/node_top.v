@@ -141,6 +141,9 @@ module top #(
 `ifdef FLASH_BOOT
     ,output wire       wcache_fill_done    // 1 = cache FFN BRAM rempli (gate start_pulse cote host)
 `endif
+`ifdef SIM
+    ,output wire [8:0] dbg_node_state       // debug SIM-only : node FSM state (localise hang)
+`endif
 );
 
     `include "model_cfg.vh"
@@ -453,8 +456,8 @@ module top #(
         w_rdata_reg <= wbuf[w_raddr_op];
     end
     always @(posedge clk_sys) begin
-        if (out_we_op) obuf[out_waddr_op[5:0]] <= out_wdata_op;
-        obuf_rdata_reg <= obuf[obuf_raddr[5:0]];
+        if (out_we_op) obuf[out_waddr_op[$clog2(D)-1:0]] <= out_wdata_op;
+        obuf_rdata_reg <= obuf[obuf_raddr[$clog2(D)-1:0]];
     end
 
 `ifdef SIM
@@ -521,17 +524,17 @@ module top #(
     reg signed [7:0] gg_sh_q_out;       // shift de Q after matmul (saved)
     reg signed [7:0] gg_sh_k_out;       // shift de K after matmul
     reg signed [7:0] gg_sh_v_out;       // shift de V after matmul
-    reg [255:0]      gg_k_packed;       // K[32] storage (32 bytes packed)
-    reg [255:0]      gg_v_packed;       // V[32] storage
-    reg [511:0]      x_save_packed;     // x_orig pour le residual (64 bytes)
+    reg [CFG_KVW*8-1:0]      gg_k_packed;       // K[KVW] storage (KVW bytes packed)
+    reg [CFG_KVW*8-1:0]      gg_v_packed;       // V[KVW] storage
+    reg [CFG_D*8-1:0] x_save_packed;     // x_orig pour le residual (D bytes)
     reg signed [7:0] gg_x_shift;        // shift courant du x sauve (pour residual)
     reg signed [7:0] gg_sh_o;           // shift de Wo (recu de PC)
     reg signed [7:0] gg_sh_rf;          // shift de rms_ffn (recu de PC)
     reg signed [7:0] gg_sh_h1;          // shift de W1 (recu de PC)
     // h1[192] storage : BSRAM force pour economiser FF (1-cycle latency read)
-    (* ram_style = "block" *) reg signed [7:0] h1_packed [0:191];
+    (* ram_style = "block" *) reg signed [7:0] h1_packed [0:CFG_HIDPAD-1];
     reg signed [7:0] h1_rdata_reg;
-    reg [7:0]        h1_raddr;
+    reg [$clog2(CFG_HIDPAD):0] h1_raddr;
     always @(posedge clk_sys) begin
         h1_rdata_reg <= h1_packed[h1_raddr];
     end
@@ -539,41 +542,41 @@ module top #(
     reg signed [7:0] gg_sh_h1_ch1;      // shift de h1 chunk 1
     reg signed [7:0] gg_sh_h1_ch2;      // shift de h1 chunk 2
     reg signed [7:0] gg_sh_h3;          // shift de W3 (recu de PC)
-    (* ram_style = "block" *) reg signed [7:0] h3_packed [0:191];
+    (* ram_style = "block" *) reg signed [7:0] h3_packed [0:CFG_HIDPAD-1];
     reg signed [7:0] h3_rdata_reg;
-    reg [7:0]        h3_raddr;
+    reg [$clog2(CFG_HIDPAD):0] h3_raddr;
     reg signed [7:0] gg_sh_h3_ch0, gg_sh_h3_ch1, gg_sh_h3_ch2;
     always @(posedge clk_sys) begin
         h3_rdata_reg <= h3_packed[h3_raddr];
     end
     // silu_packed : output silu sur 3 chunks de 64 (192 bytes)
-    (* ram_style = "block" *) reg signed [7:0] silu_packed [0:191];
+    (* ram_style = "block" *) reg signed [7:0] silu_packed [0:CFG_HIDPAD-1];
     reg signed [7:0] silu_rdata_reg;
-    reg [7:0]        silu_raddr;
+    reg [$clog2(CFG_HIDPAD):0] silu_raddr;
     reg signed [7:0] gg_sh_silu_ch0, gg_sh_silu_ch1, gg_sh_silu_ch2;
     reg [1:0]        gg_silu_chunk;     // 0..2 quel chunk silu on traite
     always @(posedge clk_sys) begin
         silu_rdata_reg <= silu_packed[silu_raddr];
     end
     // tmp_prod : produits silu*h3 stockes en int32 (aligne au shift common)
-    (* ram_style = "block" *) reg signed [31:0] tmp_prod [0:191];
+    (* ram_style = "block" *) reg signed [31:0] tmp_prod [0:CFG_HIDPAD-1];
     reg signed [31:0] tmp_prod_rdata_reg;
-    reg [7:0]         tmp_prod_raddr;
+    reg [$clog2(CFG_HIDPAD):0] tmp_prod_raddr;
     always @(posedge clk_sys) begin
         tmp_prod_rdata_reg <= tmp_prod[tmp_prod_raddr];
     end
     // h_gated : output multiply, single shift
-    (* ram_style = "block" *) reg signed [7:0] h_gated_packed [0:191];
+    (* ram_style = "block" *) reg signed [7:0] h_gated_packed [0:CFG_HIDPAD-1];
     reg signed [7:0] h_gated_rdata_reg;
-    reg [7:0]        h_gated_raddr;
+    reg [$clog2(CFG_HIDPAD):0] h_gated_raddr;
     reg signed [7:0] gg_sh_h_gated;
     always @(posedge clk_sys) begin
         h_gated_rdata_reg <= h_gated_packed[h_gated_raddr];
     end
     // W2 chunked : partials BSRAM
-    (* ram_style = "block" *) reg signed [7:0] partials_packed [0:191];
+    (* ram_style = "block" *) reg signed [7:0] partials_packed [0:CFG_HIDPAD-1];
     reg signed [7:0] partials_rdata_reg;
-    reg [7:0]        partials_raddr;
+    reg [$clog2(CFG_HIDPAD):0] partials_raddr;
     reg signed [7:0] gg_sh_h_gated_x;     // shift de l'input W2 (= gg_sh_h_gated)
     reg signed [7:0] gg_sh_w2;            // shift Wo (recu de PC)
     reg signed [7:0] gg_sh_p0, gg_sh_p1, gg_sh_p2;
@@ -596,7 +599,7 @@ module top #(
     wire signed [7:0] sh_extra_0 = sh_prod_0 - sh_prod_min;
     wire signed [7:0] sh_extra_1 = sh_prod_1 - sh_prod_min;
     wire signed [7:0] sh_extra_2 = sh_prod_2 - sh_prod_min;
-    reg [7:0] gg_mult_i;            // index 0..191
+    reg [$clog2(CFG_HIDPAD):0] gg_mult_i; // index 0..HIDPAD-1 (3 chunks de D)
     reg [1:0] gg_mult_chunk;        // i[7:6] = chunk index
     reg [31:0] gg_mult_max_abs;
     reg [5:0]  gg_mult_lead_bit;
@@ -609,16 +612,16 @@ module top #(
         gg_mult_add_shift = (gg_mult_lead_bit > 6'd6) ? (gg_mult_lead_bit - 6'd6) : 6'd0;
     end
 
-    // ---- Cos/sin storage (pour RoPE) ----
-    reg signed [15:0] cos_reg [0:3];
-    reg signed [15:0] sin_reg [0:3];
+    // ---- Cos/sin storage (pour RoPE) : HALF = HS/2 entries ----
+    reg signed [15:0] cos_reg [0:CFG_HALF-1];
+    reg signed [15:0] sin_reg [0:CFG_HALF-1];
 
-    // ---- Q storage : 64 bytes packed (8 heads * 8 elements) ----
-    reg [511:0] Q_packed;    // 64 bytes
-    reg [511:0] Out_packed;  // 64 bytes
-    reg [3:0]   mh_h;        // index head courant (0..7)
-    // Q_flat fourni a attention_head_op : 8 bytes du head mh_h
-    wire [63:0] Q_flat = Q_packed[mh_h*64 +: 64];
+    // ---- Q storage : D bytes packed (H heads * HS elements) ----
+    reg [CFG_D*8-1:0] Q_packed;    // D bytes
+    reg [CFG_D*8-1:0] Out_packed;  // D bytes
+    reg [CFG_LOG2_H:0] mh_h;        // index head courant (0..H-1 ; Phase 7 : $clog2(H):0 couvre H<=32)
+    // Q_flat fourni a attention_head_op : HS bytes du head mh_h
+    wire [CFG_HS*8-1:0] Q_flat = Q_packed[mh_h*(CFG_HS*8) +: CFG_HS*8];
 
     // ---- RMSNorm ----
     reg               rms_start;
@@ -675,14 +678,14 @@ module top #(
     wire [3:0]        rope_pair_idx;
     wire signed [31:0] dbg_rope_real, dbg_rope_imag;
 
-    rope_op #(.HS(8), .HALF(4)) u_rope (
+    rope_op #(.HS(CFG_HS), .HALF(CFG_HALF)) u_rope (
         .clk(clk_sys), .rst(rst), .start(rope_start), .done(rope_done),
         .shift_x(rope_shift_x), .shift_out(rope_shift_out),
         .x_raddr(rope_x_raddr), .x_rdata(x_rdata_reg),
         .out_waddr(rope_out_waddr), .out_wdata(rope_out_wdata), .out_we(rope_out_we),
         .pair_idx(rope_pair_idx),
-        .cos_in(cos_reg[rope_pair_idx[1:0]]),
-        .sin_in(sin_reg[rope_pair_idx[1:0]]),
+        .cos_in(cos_reg[rope_pair_idx[CFG_LOG2_HALF-1:0]]),
+        .sin_in(sin_reg[rope_pair_idx[CFG_LOG2_HALF-1:0]]),
         .dbg_new_real(dbg_rope_real), .dbg_new_imag(dbg_rope_imag)
     );
 
@@ -722,7 +725,7 @@ module top #(
     wire signed [7:0]  dbg_attn_max_score;
     wire [15:0]        dbg_attn_exp_sum, dbg_attn_inv_sum;
 
-    attention_head_op #(.HS(8), .T_MAX(32)) u_attn (
+    attention_head_op #(.HS(CFG_HS), .T_MAX(CFG_TMAX), .SCORE_SH(CFG_SCORE_SH)) u_attn (
         .clk(clk_sys), .rst(rst), .start(attn_start), .done(attn_done),
         .T(attn_T),
         .shift_q(attn_shift_q), .shift_k(attn_shift_k), .shift_v(attn_shift_v),
@@ -771,7 +774,7 @@ module top #(
     assign w_raddr_op   = op_fm    ? w_raddr_fm     :
                           use_attn ? attn_v_raddr   : rms_w_raddr;
     // EE (embedding lookup) ecrit directement in obuf via ces regs
-    reg [5:0]        ee_obuf_waddr;
+    reg [$clog2(D)-1:0] ee_obuf_waddr;
     reg signed [7:0] ee_obuf_wdata;
     reg              ee_obuf_we;
 
@@ -903,7 +906,8 @@ module top #(
         S_FN_RDW    = 7'd100,
         S_FN_WB     = 7'd101,
         // FM (matmul y=W.x with W in SDRAM, K=64 fixe)
-        S_FM_N      = 7'd102,    // receives N
+        S_FM_N      = 7'd102,    // receives N (lo byte)
+        S_FM_N2     = 8'd255,    // receives N (hi byte) -- dim-rework Phase 7 : N sur 2 octets (D>255)
         S_FM_SX     = 7'd103,
         S_FM_SW     = 7'd104,
         S_FM_RX_X   = 7'd105,    // receives x[64]
@@ -915,7 +919,7 @@ module top #(
         S_FM_RDW    = 7'd111,
         S_FM_WB     = 7'd112,    // wbuf[fetch_idx] <= sd_dout
         S_FM_DOT_ADDR  = 7'd113, // pipelined dot : amorce addr k=0 (1 cyc)
-        S_FM_DOT_ISSUE = 7'd114, // 1 elem/cycle -> mac18 (64 issues)
+        S_FM_DOT_ISSUE = 7'd114, // 1 elem/cycle -> mac18 (D+1=65 issues, read registeré 1-cyc)
         S_FM_DOT_DRAIN = 7'd115, // 3 cyc latence mac18, puis dot_acc = result
         S_FM_DOT_M     = 7'd116, // (inutilise, reserve)
         S_FM_STORE  = 7'd117,    // ecrit y[row] (4 oct LE) in obuf
@@ -1171,28 +1175,29 @@ module top #(
     // compteurs LL/CC/FN/FM
     reg [15:0] bulk_n;
     reg [3:0]  bulk_delay;
-    reg [6:0]  fetch_idx;
+    reg [$clog2(D):0]  fetch_idx;
     // Pour FM / FQ (N etendu a 64 pour realistic matmul wq/wo)
-    reg [6:0]  fm_row;             // 0..63
-    reg [6:0]  fm_N;               // 1..64
-    reg [6:0]  dot_k;
+    reg [$clog2(D):0]  fm_row;             // 0..N-1 (N=D)
+    reg [$clog2(D):0]  fm_N;               // 1..D (output count matmul)
+    reg [7:0]          n_lo;               // dim-rework Phase 7 : N lo byte (protocole N sur 2 octets, D>255)
+    reg [$clog2(D):0]  dot_k;
     reg signed [31:0] dot_acc;
     // Stockage int32 pour requantize (FQ uniquement, N <= 64)
-    (* ram_style = "registers" *) reg signed [31:0] y_int32 [0:63];
+    (* ram_style = "registers" *) reg signed [31:0] y_int32 [0:D-1];
 `ifdef SIM
     // Sim-only : y_int32 (reg array) non init -> X en icarus ; écrit par S_FM_STORE
     // avant lecture, mais si un matmul upstream produit X (cascade attention), y_int32
     // =X -> requant X -> Q X. Init 0 = default ECP5 (cf flash-boot-mock-sim).
     integer sim_yi;
     initial begin
-        for (sim_yi = 0; sim_yi < 64; sim_yi = sim_yi + 1) y_int32[sim_yi] = 32'sd0;
+        for (sim_yi = 0; sim_yi < D; sim_yi = sim_yi + 1) y_int32[sim_yi] = 32'sd0;
     end
 `endif
     reg [31:0] max_abs;
     reg [5:0]  fq_lead_bit;
     reg [5:0]  fq_shift_out;
     reg signed [7:0] fq_shift_total;
-    reg [6:0]  fq_idx;             // 0..63
+    reg [$clog2(D):0]  fq_idx;             // 0..D-1 (FQ output index)
     // Mult signed locaux (Gowin gotcha)
     reg signed [15:0] fm_xs16, fm_ws16;
     integer fq_i;
@@ -1259,9 +1264,12 @@ module top #(
                        op_soft ? 10'd32 :
                        op_attn ? 10'd8 :
                        op_fm   ? {1'd0, fm_N, 2'd0} :              // FM : N*4 bytes
-                                 10'd64;
+                                 D;                                  // default (op_silu/residuel) : D bytes
 
     reg [8:0] state;            // 9-bit (256+ pour GG v5 full)
+`ifdef SIM
+    assign dbg_node_state = state;   // debug SIM-only : expose node FSM state
+`endif
     reg [8:0] ret_state;
     reg [8:0] next_state;
     reg [9:0] rx_idx, tx_idx;
@@ -1274,8 +1282,19 @@ module top #(
     // y_int32[fm_row] base is added back in S_FM_DOT_DRAIN.
     assign             mac_ce    = (state == S_FM_DOT_ISSUE) || (state == S_FM_DOT_DRAIN);
     assign             mac_load  = (state == S_FM_DOT_ISSUE) && (dot_k == 7'd0);
-    assign             mac_a     = (state == S_FM_DOT_DRAIN) ? 18'sd0 : {{2{fm_xs16[15]}}, fm_xs16};
-    assign             mac_b     = (state == S_FM_DOT_DRAIN) ? 18'sd0 : {{2{fm_ws16[15]}}, fm_ws16};
+    // mac_a/mac_b zeroed au dot_k==0 (cycle de load) : le read xbuf 1-cycle registeré
+    // presente xbuf[stale_addr] au cycle dot_k==0 (x_raddr_fm vaut 65 = valeur résiduelle
+    // de la fin du FQ précédent, donc lit xbuf[65]). Le mac_load=1 ici fait acc <= a*b
+    // = xbuf[65]*wbuf[65] (terme STALE) au cycle acc@4. Or xbuf[65] n'est non-zero que
+    // quand le MM a écrit K dans xbuf[0..T*KVW-1] avec T*KVW>65 (T>=3, i.e. pos>=2) -> le
+    // dot FQ est corrompu d'un terme stale K[65]*V[65] à partir de pos2 (wo/wv/wq...).
+    // Zeroer mac_a/mac_b au load -> acc@4 = 0 (load propre), puis xbuf[0..63] accumulés
+    // aux cycles suivants (xbuf[k] alimenté à dot_k=k+1, sommé à acc@k+5). xbuf[0..63]
+    // (les vrais termes) ne sont PAS affectés : ils entrent via a_r aux cycles dot_k>=1.
+    assign             mac_a     = (state == S_FM_DOT_DRAIN || mac_load)
+                                  ? 18'sd0 : {{2{fm_xs16[15]}}, fm_xs16};
+    assign             mac_b     = (state == S_FM_DOT_DRAIN || mac_load)
+                                  ? 18'sd0 : {{2{fm_ws16[15]}}, fm_ws16};
     reg  [1:0]         drain_cnt;
 
     assign rx_consume = rx_pending && (
@@ -1299,7 +1318,7 @@ module top #(
         state == S_CC_N0    || state == S_CC_N1   ||
         state == S_M2_F     || state == S_FN_SX   || state == S_FN_SW || state == S_FN_RX_X ||
         state == S_FN_A0    || state == S_FN_A1   || state == S_FN_A2 ||
-        state == S_FM_N     || state == S_FM_SX   || state == S_FM_SW || state == S_FM_RX_X ||
+        state == S_FM_N     || state == S_FM_N2   || state == S_FM_SX   || state == S_FM_SW || state == S_FM_RX_X ||
         state == S_FM_A0    || state == S_FM_A1   || state == S_FM_A2 ||
         state == S_CN_SX    || state == S_CN_SW_RMS || state == S_CN_SW_MM ||
         state == S_CN_N     || state == S_CN_RX_X ||
@@ -1444,24 +1463,24 @@ module top #(
                 end
                 S_RR_RX_X: if (rx_pending) begin
                     xbuf_waddr <= rx_idx; xbuf_wdata <= $signed(rx_byte); xbuf_we <= 1'b1;
-                    if (rx_idx == 10'd7) begin rx_idx <= 10'd0; state <= S_RR_RX_COS; end
+                    if (rx_idx == (CFG_HS-1)) begin rx_idx <= 10'd0; state <= S_RR_RX_COS; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_RR_RX_COS: if (rx_pending) begin
-                    // 8 bytes = 4 int16 LE -> cos_reg[0..3]
+                    // 2*HALF bytes = HALF int16 LE -> cos_reg[0..HALF-1]
                     if (rx_idx[0] == 1'b0)
-                        cos_reg[rx_idx[2:1]][7:0]  <= rx_byte;
+                        cos_reg[rx_idx[CFG_LOG2_HS-1:1]][7:0]  <= rx_byte;
                     else
-                        cos_reg[rx_idx[2:1]][15:8] <= rx_byte;
-                    if (rx_idx == 10'd7) begin rx_idx <= 10'd0; state <= S_RR_RX_SIN; end
+                        cos_reg[rx_idx[CFG_LOG2_HS-1:1]][15:8] <= rx_byte;
+                    if (rx_idx == (CFG_HS-1)) begin rx_idx <= 10'd0; state <= S_RR_RX_SIN; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_RR_RX_SIN: if (rx_pending) begin
                     if (rx_idx[0] == 1'b0)
-                        sin_reg[rx_idx[2:1]][7:0]  <= rx_byte;
+                        sin_reg[rx_idx[CFG_LOG2_HS-1:1]][7:0]  <= rx_byte;
                     else
-                        sin_reg[rx_idx[2:1]][15:8] <= rx_byte;
-                    if (rx_idx == 10'd7) begin rope_start <= 1'b1; state <= S_RUN_ROPE; end
+                        sin_reg[rx_idx[CFG_LOG2_HS-1:1]][15:8] <= rx_byte;
+                    if (rx_idx == (CFG_HS-1)) begin rope_start <= 1'b1; state <= S_RUN_ROPE; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_RUN_ROPE: if (rope_done) state <= S_TX_M1;
@@ -1489,27 +1508,27 @@ module top #(
                 end
                 S_AA_T: if (rx_pending) begin
                     attn_T <= rx_byte[5:0];
-                    attn_kv_stride <= 6'd8;     // single-head : K layout = [t][hs]
+                    attn_kv_stride <= CFG_HS;     // single-head : K layout = [t][hs]
                     attn_kv_offset <= 6'd0;
                     mh_h <= 4'd0;
                     rx_idx <= 10'd0;
                     state <= S_AA_RX_Q;
                 end
                 S_AA_RX_Q: if (rx_pending) begin
-                    // packe in Q_packed[0..7] (mh_h=0 alimentera Q_flat)
-                    Q_packed[rx_idx[2:0]*8 +: 8] <= rx_byte;
-                    if (rx_idx == 10'd7) begin rx_idx <= 10'd0; state <= S_AA_RX_K; end
+                    // packe in Q_packed[0..HS-1] (mh_h=0 alimentera Q_flat)
+                    Q_packed[rx_idx[CFG_LOG2_HS-1:0]*8 +: 8] <= rx_byte;
+                    if (rx_idx == (CFG_HS-1)) begin rx_idx <= 10'd0; state <= S_AA_RX_K; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_AA_RX_K: if (rx_pending) begin
                     xbuf_waddr <= rx_idx; xbuf_wdata <= $signed(rx_byte); xbuf_we <= 1'b1;
-                    if (rx_idx == ({1'd0, attn_T, 3'd0} - 10'd1)) begin    // T*8-1
+                    if (rx_idx == ({1'd0, attn_T, {CFG_LOG2_HS{1'b0}}} - 10'd1)) begin    // T*HS-1
                         rx_idx <= 10'd0; state <= S_AA_RX_V;
                     end else rx_idx <= rx_idx + 10'd1;
                 end
                 S_AA_RX_V: if (rx_pending) begin
                     wbuf_waddr <= rx_idx; wbuf_wdata <= $signed(rx_byte); wbuf_we <= 1'b1;
-                    if (rx_idx == ({1'd0, attn_T, 3'd0} - 10'd1)) begin    // T*8-1
+                    if (rx_idx == ({1'd0, attn_T, {CFG_LOG2_HS{1'b0}}} - 10'd1)) begin    // T*HS-1
                         attn_start <= 1'b1; state <= S_RUN_ATTN;
                     end else rx_idx <= rx_idx + 10'd1;
                 end
@@ -1531,41 +1550,41 @@ module top #(
                 end
                 S_MM_T: if (rx_pending) begin
                     attn_T <= rx_byte[5:0];
-                    attn_kv_stride <= 6'd32;   // multi-head GQA : K layout = [t][kvh][hs]
+                    attn_kv_stride <= CFG_KVW;   // multi-head GQA : K layout = [t][kvh][hs]
                     rx_idx <= 10'd0;
                     state  <= S_MM_RX_Q;
                 end
                 S_MM_RX_Q: if (rx_pending) begin
-                    Q_packed[rx_idx[5:0]*8 +: 8] <= rx_byte;
-                    if (rx_idx == 10'd63) begin rx_idx <= 10'd0; state <= S_MM_RX_K; end
+                    Q_packed[rx_idx[CFG_DBITS-1:0]*8 +: 8] <= rx_byte;
+                    if (rx_idx == (CFG_D-1)) begin rx_idx <= 10'd0; state <= S_MM_RX_K; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_MM_RX_K: if (rx_pending) begin
-                    // K stocke in xbuf[0..T*32-1]
+                    // K stocke in xbuf[0..T*KVW-1]
                     xbuf_waddr <= rx_idx; xbuf_wdata <= $signed(rx_byte); xbuf_we <= 1'b1;
-                    if (rx_idx == ({1'd0, attn_T, 5'd0} - 12'd1)) begin   // T*32-1, max 1023
+                    if (rx_idx == ({1'd0, attn_T, {CFG_KVWBITS{1'b0}}} - 12'd1)) begin   // T*KVW-1
                         rx_idx <= 10'd0; state <= S_MM_RX_V;
                     end else rx_idx <= rx_idx + 10'd1;
                 end
                 S_MM_RX_V: if (rx_pending) begin
                     wbuf_waddr <= rx_idx; wbuf_wdata <= $signed(rx_byte); wbuf_we <= 1'b1;
-                    if (rx_idx == ({1'd0, attn_T, 5'd0} - 12'd1)) begin
+                    if (rx_idx == ({1'd0, attn_T, {CFG_KVWBITS{1'b0}}} - 12'd1)) begin
                         mh_h <= 4'd0;
                         state <= S_MM_HEAD;
                     end else rx_idx <= rx_idx + 10'd1;
                 end
                 // loop multi-head : pour h=0..H-1, configure kv_offset, run attn, copie output
                 S_MM_HEAD: begin
-                    // kv_offset = kvh * HS = (h >> 1) * 8 = {h[3:1], 3'd0}
-                    attn_kv_offset <= {1'b0, mh_h[3:1], 3'd0};
+                    // kv_offset = kvh * HS = (h / NREP) * HS = (h >> log2 NREP) * HS
+                    attn_kv_offset <= (mh_h >> CFG_LOG2_NREP) * CFG_HS;
                     attn_start     <= 1'b1;
                     state          <= S_MM_WAIT;
                 end
                 S_MM_WAIT: if (attn_done) begin
-                    rx_idx <= 10'd0;   // reuse comme copy index 0..7
+                    rx_idx <= 10'd0;   // reuse comme copy index 0..HS-1
                     state  <= S_MM_COPY1;
                 end
-                // Copie obuf[0..7] -> Out_packed[mh_h*64..mh_h*64+63]
+                // Copie obuf[0..HS-1] -> Out_packed[mh_h*HS*8 .. +HS*8-1]
                 S_MM_COPY1: begin
                     obuf_raddr <= rx_idx;
                     state      <= S_MM_COPY2;
@@ -1573,12 +1592,12 @@ module top #(
                 S_MM_COPY2: state <= S_MM_COPY3;
                 S_MM_COPY3: begin
                     // obuf_rdata_reg valide
-                    Out_packed[(mh_h*64) + (rx_idx[2:0]*8) +: 8] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd7) state <= S_MM_NEXT;
+                    Out_packed[(mh_h*(CFG_HS*8)) + (rx_idx[CFG_LOG2_HS-1:0]*8) +: 8] <= obuf_rdata_reg;
+                    if (rx_idx == (CFG_HS-1)) state <= S_MM_NEXT;
                     else begin rx_idx <= rx_idx + 10'd1; state <= S_MM_COPY1; end
                 end
                 S_MM_NEXT: begin
-                    if (mh_h == 4'd7) begin
+                    if (mh_h == (CFG_H-1)) begin
                         if (gg_active) begin
                             op_sel <= 4'd10;         // restore op_gg
                             rx_idx <= 10'd0;
@@ -1753,7 +1772,7 @@ module top #(
                 end
                 S_FN_RX_X: if (rx_pending) begin
                     xbuf_waddr <= rx_idx; xbuf_wdata <= $signed(rx_byte); xbuf_we <= 1'b1;
-                    if (rx_idx == 10'd63) begin rx_idx <= 10'd0; state <= S_FN_A0; end
+                    if (rx_idx == D-1) begin rx_idx <= 10'd0; state <= S_FN_A0; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_FN_A0: if (rx_pending) begin sd_addr[7:0]   <= rx_byte;       state <= S_FN_A1; end
@@ -1780,7 +1799,7 @@ module top #(
                     wbuf_wdata <= sd_dout;
                     wbuf_we    <= 1'b1;
                     sd_addr    <= sd_addr + 23'd1;
-                    if (fetch_idx == 7'd63) begin
+                    if (fetch_idx == D-1) begin
                         rms_start <= 1'b1;          // lance rmsnorm
                         state     <= S_RUN_RMS;
                     end else begin
@@ -1790,16 +1809,15 @@ module top #(
                 end
 
                 // ---- FM (matmul y[N]=W.x with W in SDRAM) ----
-                S_FM_N:  if (rx_pending) begin fm_N <= rx_byte[6:0]; state <= S_FM_SX; end
+                // dim-rework Phase 7 : N sur 2 octets (D>255). Nlo puis Nhi, fm_N={hi,lo}
+                // tronqué à [$clog2(D):0] (N<=D<=512 tient). Bit-identique à D<=255 (hi=0).
+                S_FM_N:  if (rx_pending) begin n_lo <= rx_byte; state <= S_FM_N2; end
+                S_FM_N2: if (rx_pending) begin fm_N <= {rx_byte, n_lo}; state <= S_FM_SX; end
                 S_FM_SX: if (rx_pending) begin rms_shift_x <= $signed(rx_byte); state <= S_FM_SW; end
                 S_FM_SW: if (rx_pending) begin rms_shift_w <= $signed(rx_byte); rx_idx <= 10'd0; state <= S_FM_RX_X; end
                 S_FM_RX_X: if (rx_pending) begin
                     xbuf_waddr <= rx_idx; xbuf_wdata <= $signed(rx_byte); xbuf_we <= 1'b1;
-`ifdef SIM_DEBUG
-                    if (rx_idx <= 10'd2 || rx_idx == 10'd63)
-                        $display("[SIM] FM_RX_X idx=%0d byte=%0d", rx_idx, $signed(rx_byte));
-`endif
-                    if (rx_idx == 10'd63) begin rx_idx <= 10'd0; state <= S_FM_A0; end
+                    if (rx_idx == D-1) begin rx_idx <= 10'd0; state <= S_FM_A0; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_FM_A0: if (rx_pending) begin sd_addr[7:0]   <= rx_byte;       state <= S_FM_A1; end
@@ -1848,7 +1866,7 @@ module top #(
                     wbuf_wdata <= ffn_hit_q ? wcache_dout : sd_dout;
                     wbuf_we    <= 1'b1;
                     sd_addr    <= sd_addr + 23'd1;
-                    if (fetch_idx == 7'd63) begin
+                    if (fetch_idx == D-1) begin
                         // line fetched -> pipelined dot via mac18 (no dot_acc init here :
                         // mac18 load=1 overwrites acc to 0+a[0]*b[0]; gg_accumulate's
                         // y_int32[fm_row] base is added back in S_FM_DOT_DRAIN).
@@ -1862,13 +1880,17 @@ module top #(
                     end
                 end
 
-                // Phase 2: pipelined dot product x[k]*w[k] sur K=64 via mac18 (DSP).
-                // ADDR (1 cyc) : amorce addr k=0 (valeur dispo au cycle ISSUE suivant).
-                // ISSUE (64 cyc) : 1 elem/cycle, mac_ce=1, load=1 au k=0 (overwrite) puis
-                //   accumulate ; addr k+1 presentee pour la valeur du cycle suivant.
-                // DRAIN (3 cyc) : mac_ce=0, attend la latence 3 cycles du mac18, puis
+                // Phase 2: pipelined dot product x[k]*w[k] sur K=D via mac18 (DSP).
+                // ADDR (1 cyc) : amorce addr k=0. Le read xbuf est registeré 1-cycle,
+                //   donc x_rdata_reg au cycle ISSUE dot_k=N = xbuf[N-1] (off-by-one) :
+                //   xbuf[0] n'apparait qu'au dot_k=1.
+                // ISSUE (D+1=65 cyc) : 1 elem/cycle, mac_ce=1, load=1 au k=0 (overwrite
+                //   du stale 0->acc=0, cf init BSRAM 0) puis accumulate. Le loop dot_k=0..D
+                //   nourrit xbuf[0..D-1] aux cycles 1..D (sinon xbuf[D-1] etait rate).
+                // DRAIN (3 cyc) : mac_ce=1, feed a=b=0, attend la latence pipeline, puis
                 //   dot_acc = mac_result[31:0] + (gg_accumulate ? y_int32[fm_row] : 0).
-                // Total ~68 cyc/line vs 256 (4 cyc/elem * 64).
+                //   3 cyc suffisent : last ISSUE a cycle C -> produit ajoute a C+2,
+                //   dot_acc latche a C+3 (drain_cnt==2).
                 S_FM_DOT_ADDR: begin
                     x_raddr_fm <= {3'd0, 7'd0};
                     w_raddr_fm <= {3'd0, 7'd0};
@@ -1879,15 +1901,8 @@ module top #(
                     // fm_xs16 = xbuf[dot_k] (addr set previous cycle), fed to mac18 this cycle
                     x_raddr_fm <= {3'd0, dot_k + 7'd1};   // prefetch k+1 for next cycle
                     w_raddr_fm <= {3'd0, dot_k + 7'd1};
-`ifdef SIM_DEBUG
-                    if (dot_k == 7'd0)
-                        $display("[SIM] FQ k0 row=%0d N=%0d xa=%0d wa=%0d x0=%0d w0=%0d xr=%0d wr=%0d",
-                                 fm_row, fm_N, x_raddr_fm, w_raddr_fm,
-                                 $signed(xbuf[0]), $signed(wbuf[0]),
-                                 $signed(x_rdata_reg), $signed(w_rdata_reg));
-`endif
-                    if (dot_k == 7'd63) begin
-                        state <= S_FM_DOT_DRAIN;          // 64th issue done, mac_ce drops next cyc
+                    if (dot_k == D) begin
+                        state <= S_FM_DOT_DRAIN;          // D+1 issues done (xbuf[0..D-1] fed)
                     end else begin
                         dot_k <= dot_k + 7'd1;
                     end
@@ -2040,7 +2055,7 @@ module top #(
                     xbuf_waddr <= rx_idx;
                     xbuf_wdata <= 8'd0;
                     xbuf_we    <= 1'b1;
-                    if (rx_idx == 10'd63) begin
+                    if (rx_idx == D-1) begin
                         silu_shift_x <= fq_shift_total;
                         silu_start   <= 1'b1;
                         op_sel       <= 4'd1;
@@ -2072,14 +2087,15 @@ module top #(
                     end else state <= S_IDLE;
                 end
                 S_EE_T0: if (rx_pending) begin
-                    // Capture token bits [7:0] in sd_addr[13:6] (= tok_lo * 64)
-                    sd_addr[13:6] <= rx_byte;
-                    sd_addr[5:0]  <= 6'd0;
+                    // sd_addr = tok*D (A_EMB=0) = tok << $clog2(D). tok_lo aux bits
+                    // [$clog2(D)+7 : $clog2(D)], low $clog2(D) bits à 0. (dim 64 : [13:6]/[5:0])
+                    sd_addr[$clog2(D)+7 : $clog2(D)] <= rx_byte;
+                    sd_addr[$clog2(D)-1 : 0]          <= {$clog2(D){1'b0}};
                     state         <= S_EE_T1;
                 end
                 S_EE_T1: if (rx_pending) begin
-                    // Capture token bits [15:8] in sd_addr[21:14] (= tok_hi * 64 * 256)
-                    sd_addr[21:14] <= rx_byte;
+                    // tok_hi aux bits [$clog2(D)+15 : $clog2(D)+8] (dim 64 : [21:14])
+                    sd_addr[$clog2(D)+15 : $clog2(D)+8] <= rx_byte;
                     sd_addr[22]    <= 1'b0;
                     state          <= S_EE_RD;
                 end
@@ -2095,11 +2111,11 @@ module top #(
                 end
                 S_EE_WB: begin
                     // ecrit in obuf et avance (via ee_obuf_we mux)
-                    ee_obuf_waddr <= fetch_idx[5:0];
+                    ee_obuf_waddr <= fetch_idx[$clog2(D)-1:0];
                     ee_obuf_wdata <= sd_dout;
                     ee_obuf_we    <= 1'b1;
                     sd_addr       <= sd_addr + 23'd1;
-                    if (fetch_idx == 7'd63) begin
+                    if (fetch_idx == D-1) begin
                         state <= S_EE_TX_E;
                     end else begin
                         fetch_idx <= fetch_idx + 7'd1;
@@ -2197,9 +2213,9 @@ module top #(
                     xbuf_wdata <= sd_dout;
                     xbuf_we    <= 1'b1;
                     // in parallel : save embed in x_save_packed pour residual
-                    x_save_packed[fetch_idx[5:0]*8 +: 8] <= sd_dout;
+                    x_save_packed[fetch_idx[$clog2(D)-1:0]*8 +: 8] <= sd_dout;
                     sd_addr    <= sd_addr + 23'd1;
-                    if (fetch_idx == 7'd63) begin
+                    if (fetch_idx == D-1) begin
                         // Embed load in xbuf. Maintenant fetch rms_w[L0] in wbuf.
                         sd_addr   <= ADDR_RMS_ATT_L0;
                         fetch_idx <= 7'd0;
@@ -2224,7 +2240,7 @@ module top #(
                     wbuf_wdata <= sd_dout;
                     wbuf_we    <= 1'b1;
                     sd_addr    <= sd_addr + 23'd1;
-                    if (fetch_idx == 7'd63) begin
+                    if (fetch_idx == D-1) begin
                         rms_start <= 1'b1;
                         state     <= S_GG_RUN_RMS;
                     end else begin
@@ -2248,7 +2264,7 @@ module top #(
                     xbuf_waddr <= rx_idx;
                     xbuf_wdata <= obuf_rdata_reg;
                     xbuf_we    <= 1'b1;
-                    if (rx_idx == 10'd63) begin
+                    if (rx_idx == D-1) begin
                         rx_idx <= 10'd0;
                         state  <= S_GG_SETUP_Q;
                     end else begin
@@ -2263,7 +2279,7 @@ module top #(
                     rms_shift_w <= gg_sh_q;         // weight shift = sh_q
                     op_sel      <= 4'd7;            // bascule sur op_fm pour FQ
                     fq_mode     <= 1'b1;
-                    fm_N        <= 7'd64;           // H * HS = 64
+                    fm_N        <= CFG_D;           // H * HS = D
                     fm_row      <= 7'd0;
                     fetch_idx   <= 7'd0;
                     state       <= S_FM_WARMUP_RD;
@@ -2276,8 +2292,8 @@ module top #(
                 S_GG_SAVE_Q_W1: state <= S_GG_SAVE_Q_W2;
                 S_GG_SAVE_Q_W2: state <= S_GG_SAVE_Q_WB;
                 S_GG_SAVE_Q_WB: begin
-                    Q_packed[rx_idx[5:0]*8 +: 8] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd63) begin
+                    Q_packed[rx_idx[$clog2(D)-1:0]*8 +: 8] <= obuf_rdata_reg;
+                    if (rx_idx == D-1) begin
                         gg_sh_q_out  <= fq_shift_total;
                         gg_qkv_phase <= 4'd1;
                         rx_idx       <= 10'd0;
@@ -2294,7 +2310,7 @@ module top #(
                     rms_shift_w <= gg_sh_k;
                     op_sel      <= 4'd7;
                     fq_mode     <= 1'b1;
-                    fm_N        <= 7'd32;            // KH * HS
+                    fm_N        <= CFG_KVW;            // KH * HS = KVW
                     fm_row      <= 7'd0;
                     fetch_idx   <= 7'd0;
                     state       <= S_FM_WARMUP_RD;
@@ -2307,8 +2323,8 @@ module top #(
                 S_GG_SAVE_K_W1: state <= S_GG_SAVE_K_W2;
                 S_GG_SAVE_K_W2: state <= S_GG_SAVE_K_WB;
                 S_GG_SAVE_K_WB: begin
-                    gg_k_packed[rx_idx[4:0]*8 +: 8] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd31) begin
+                    gg_k_packed[rx_idx[CFG_KVWBITS-1:0]*8 +: 8] <= obuf_rdata_reg;
+                    if (rx_idx == (CFG_KVW-1)) begin
                         gg_sh_k_out  <= fq_shift_total;
                         gg_qkv_phase <= 4'd2;
                         rx_idx       <= 10'd0;
@@ -2325,7 +2341,7 @@ module top #(
                     rms_shift_w <= gg_sh_v;
                     op_sel      <= 4'd7;
                     fq_mode     <= 1'b1;
-                    fm_N        <= 7'd32;
+                    fm_N        <= CFG_KVW;
                     fm_row      <= 7'd0;
                     fetch_idx   <= 7'd0;
                     state       <= S_FM_WARMUP_RD;
@@ -2338,8 +2354,8 @@ module top #(
                 S_GG_SAVE_V_W1: state <= S_GG_SAVE_V_W2;
                 S_GG_SAVE_V_W2: state <= S_GG_SAVE_V_WB;
                 S_GG_SAVE_V_WB: begin
-                    gg_v_packed[rx_idx[4:0]*8 +: 8] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd31) begin
+                    gg_v_packed[rx_idx[CFG_KVWBITS-1:0]*8 +: 8] <= obuf_rdata_reg;
+                    if (rx_idx == (CFG_KVW-1)) begin
                         gg_sh_v_out <= fq_shift_total;
                         rx_idx      <= 10'd0;
                         state       <= S_GG_LOAD_KV;     // v3 : passe a attention
@@ -2352,12 +2368,12 @@ module top #(
                 S_GG_LOAD_KV: begin
                     // T=1 : K[0..31] -> xbuf[0..31], V[0..31] -> wbuf[0..31]
                     xbuf_waddr <= rx_idx;
-                    xbuf_wdata <= gg_k_packed[rx_idx[4:0]*8 +: 8];
+                    xbuf_wdata <= gg_k_packed[rx_idx[CFG_KVWBITS-1:0]*8 +: 8];
                     xbuf_we    <= 1'b1;
                     wbuf_waddr <= rx_idx;
-                    wbuf_wdata <= gg_v_packed[rx_idx[4:0]*8 +: 8];
+                    wbuf_wdata <= gg_v_packed[rx_idx[CFG_KVWBITS-1:0]*8 +: 8];
                     wbuf_we    <= 1'b1;
-                    if (rx_idx == 10'd31) state <= S_GG_SETUP_MM;
+                    if (rx_idx == (CFG_KVW-1)) state <= S_GG_SETUP_MM;
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_GG_SETUP_MM: begin
@@ -2366,7 +2382,7 @@ module top #(
                     attn_shift_k   <= gg_sh_k_out;
                     attn_shift_v   <= gg_sh_v_out;
                     attn_T         <= 6'd1;
-                    attn_kv_stride <= 6'd32;       // multi-head : [t][kvh][hs]
+                    attn_kv_stride <= CFG_KVW;       // multi-head : [t][kvh][hs]
                     mh_h           <= 4'd0;
                     op_sel         <= 4'd5;        // op_mh pour loop MM
                     state          <= S_MM_HEAD;   // reuse flow MM existant
@@ -2385,9 +2401,9 @@ module top #(
                     state   <= S_GG_TX_AD;
                 end
                 S_GG_TX_AD: if (!tx_busy && !tx_send) begin
-                    tx_data <= Out_packed[tx_idx[5:0]*8 +: 8];
+                    tx_data <= Out_packed[tx_idx[$clog2(D)-1:0]*8 +: 8];
                     tx_send <= 1'b1;
-                    if (tx_idx == 10'd63) begin
+                    if (tx_idx == D-1) begin
                         gg_active <= 1'b0;
                         state     <= S_IDLE;
                     end else tx_idx <= tx_idx + 10'd1;
@@ -2396,9 +2412,9 @@ module top #(
                 // ---- v4 : load attn_out from Out_packed to xbuf ----
                 S_GG_LOAD_ATTN: begin
                     xbuf_waddr <= rx_idx;
-                    xbuf_wdata <= Out_packed[rx_idx[5:0]*8 +: 8];
+                    xbuf_wdata <= Out_packed[rx_idx[$clog2(D)-1:0]*8 +: 8];
                     xbuf_we    <= 1'b1;
-                    if (rx_idx == 10'd63) state <= S_GG_SETUP_WO;
+                    if (rx_idx == D-1) state <= S_GG_SETUP_WO;
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 // ---- v4 : setup matmul Wo ----
@@ -2408,7 +2424,7 @@ module top #(
                     rms_shift_w  <= gg_sh_o;
                     op_sel       <= 4'd7;               // op_fm pour FQ
                     fq_mode      <= 1'b1;
-                    fm_N         <= 7'd64;              // output D=64
+                    fm_N         <= D;              // output D=64
                     fm_row       <= 7'd0;
                     fetch_idx    <= 7'd0;
                     gg_qkv_phase <= 4'd3;               // phase 3 = post-Wo
@@ -2435,7 +2451,7 @@ module top #(
                         reg signed [31:0] x_i32, out_i32, sum_i32;
                         reg [31:0]        absy;
                         reg signed [7:0]  sh_x_diff, sh_o_diff;
-                        x_orig_i8 = $signed(x_save_packed[{fq_idx[5:0], 3'b0} +: 8]);
+                        x_orig_i8 = $signed(x_save_packed[{fq_idx[$clog2(D)-1:0], 3'b0} +: 8]);
                         out_i8    = obuf_rdata_reg;
                         // sh_min = min(gg_x_shift, fq_shift_total)
                         if (gg_x_shift < fq_shift_total) begin
@@ -2452,12 +2468,12 @@ module top #(
                         absy = sum_i32[31] ? (~sum_i32 + 32'd1) : sum_i32;
                         if (absy > max_abs) max_abs <= absy;
                     end
-                    if (fq_idx == 7'd63) begin
+                    if (fq_idx == D-1) begin
                         // Setup pour FQ_SHIFT : rms_shift_x = sh_min, rms_shift_w = 0
                         // fq_shift_total = sh_min + add_shift after requantize
                         op_sel       <= 4'd7;       // FQ pour ecrire obuf via out_we_fm
                         fq_mode      <= 1'b1;
-                        fm_N         <= 7'd64;
+                        fm_N         <= D;
                         rms_shift_x  <= (gg_x_shift < fq_shift_total) ? gg_x_shift : fq_shift_total;
                         rms_shift_w  <= 8'sd0;
                         gg_qkv_phase <= 4'd4;
@@ -2477,8 +2493,8 @@ module top #(
                 S_GG_SAVE_X_W1: state <= S_GG_SAVE_X_W2;
                 S_GG_SAVE_X_W2: state <= S_GG_SAVE_X_WB;
                 S_GG_SAVE_X_WB: begin
-                    x_save_packed[rx_idx[5:0]*8 +: 8] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd63) begin
+                    x_save_packed[rx_idx[$clog2(D)-1:0]*8 +: 8] <= obuf_rdata_reg;
+                    if (rx_idx == D-1) begin
                         // Update gg_x_shift = fq_shift_total (le shift final after residual+requant)
                         gg_x_shift <= fq_shift_total;
                         op_sel     <= 4'd10;
@@ -2493,9 +2509,9 @@ module top #(
                 // Copy x_save_packed -> xbuf (input du rmsnorm_ffn)
                 S_GG_FFN_COPY_RD: begin
                     xbuf_waddr <= rx_idx;
-                    xbuf_wdata <= x_save_packed[rx_idx[5:0]*8 +: 8];
+                    xbuf_wdata <= x_save_packed[rx_idx[$clog2(D)-1:0]*8 +: 8];
                     xbuf_we    <= 1'b1;
-                    if (rx_idx == 10'd63) begin
+                    if (rx_idx == D-1) begin
                         sd_addr   <= ADDR_RMS_FFN_L0;
                         fetch_idx <= 7'd0;
                         state     <= S_GG_FFN_FETCH_RD;
@@ -2516,7 +2532,7 @@ module top #(
                     wbuf_wdata <= sd_dout;
                     wbuf_we    <= 1'b1;
                     sd_addr    <= sd_addr + 23'd1;
-                    if (fetch_idx == 7'd63) begin
+                    if (fetch_idx == D-1) begin
                         // Setup rmsnorm pour FFN : shift_x = gg_x_shift (= sh after residual), shift_w = sh_rms_ffn
                         rms_shift_x <= gg_x_shift;
                         rms_shift_w <= gg_sh_rf;
@@ -2542,7 +2558,7 @@ module top #(
                     xbuf_waddr <= rx_idx;
                     xbuf_wdata <= obuf_rdata_reg;
                     xbuf_we    <= 1'b1;
-                    if (rx_idx == 10'd63) begin
+                    if (rx_idx == D-1) begin
                         rx_idx <= 10'd0;
                         state  <= S_GG_SETUP_W1;
                     end else begin
@@ -2557,7 +2573,7 @@ module top #(
                     rms_shift_w  <= gg_sh_h1;
                     op_sel       <= 4'd7;
                     fq_mode      <= 1'b1;
-                    fm_N         <= 7'd64;
+                    fm_N         <= D;
                     fm_row       <= 7'd0;
                     fetch_idx    <= 7'd0;
                     gg_qkv_phase <= 4'd5;
@@ -2571,8 +2587,8 @@ module top #(
                 S_GG_SAVE_H1_CH0_W1: state <= S_GG_SAVE_H1_CH0_W2;
                 S_GG_SAVE_H1_CH0_W2: state <= S_GG_SAVE_H1_CH0_WB;
                 S_GG_SAVE_H1_CH0_WB: begin
-                    h1_packed[rx_idx[7:0]] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd63) begin
+                    h1_packed[rx_idx[$clog2(D)-1:0]] <= obuf_rdata_reg;
+                    if (rx_idx == D-1) begin
                         gg_sh_h1_ch0 <= fq_shift_total;
                         rx_idx       <= 10'd0;
                         state        <= S_GG_SETUP_W1_CH1;
@@ -2588,7 +2604,7 @@ module top #(
                     rms_shift_w  <= gg_sh_h1;
                     op_sel       <= 4'd7;
                     fq_mode      <= 1'b1;
-                    fm_N         <= 7'd64;
+                    fm_N         <= D;
                     fm_row       <= 7'd0;
                     fetch_idx    <= 7'd0;
                     gg_qkv_phase <= 4'd6;
@@ -2601,8 +2617,8 @@ module top #(
                 S_GG_SAVE_H1_CH1_W1: state <= S_GG_SAVE_H1_CH1_W2;
                 S_GG_SAVE_H1_CH1_W2: state <= S_GG_SAVE_H1_CH1_WB;
                 S_GG_SAVE_H1_CH1_WB: begin
-                    h1_packed[8'd64 + rx_idx[7:0]] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd63) begin
+                    h1_packed[D + rx_idx[$clog2(D)-1:0]] <= obuf_rdata_reg;
+                    if (rx_idx == D-1) begin
                         gg_sh_h1_ch1 <= fq_shift_total;
                         rx_idx       <= 10'd0;
                         state        <= S_GG_SETUP_W1_CH2;
@@ -2618,7 +2634,7 @@ module top #(
                     rms_shift_w  <= gg_sh_h1;
                     op_sel       <= 4'd7;
                     fq_mode      <= 1'b1;
-                    fm_N         <= 7'd64;
+                    fm_N         <= D;
                     fm_row       <= 7'd0;
                     fetch_idx    <= 7'd0;
                     gg_qkv_phase <= 4'd7;
@@ -2631,8 +2647,8 @@ module top #(
                 S_GG_SAVE_H1_CH2_W1: state <= S_GG_SAVE_H1_CH2_W2;
                 S_GG_SAVE_H1_CH2_W2: state <= S_GG_SAVE_H1_CH2_WB;
                 S_GG_SAVE_H1_CH2_WB: begin
-                    h1_packed[8'd128 + rx_idx[7:0]] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd63) begin
+                    h1_packed[2*D + rx_idx[$clog2(D)-1:0]] <= obuf_rdata_reg;
+                    if (rx_idx == D-1) begin
                         gg_sh_h1_ch2 <= fq_shift_total;
                         rx_idx       <= 10'd0;
                         state        <= S_GG_SETUP_W3_CH0;     // chain to W3
@@ -2648,7 +2664,7 @@ module top #(
                     rms_shift_w  <= gg_sh_h3;
                     op_sel       <= 4'd7;
                     fq_mode      <= 1'b1;
-                    fm_N         <= 7'd64;
+                    fm_N         <= D;
                     fm_row       <= 7'd0;
                     fetch_idx    <= 7'd0;
                     gg_qkv_phase <= 4'd8;
@@ -2658,8 +2674,8 @@ module top #(
                 S_GG_SAVE_H3_CH0_W1: state <= S_GG_SAVE_H3_CH0_W2;
                 S_GG_SAVE_H3_CH0_W2: state <= S_GG_SAVE_H3_CH0_WB;
                 S_GG_SAVE_H3_CH0_WB: begin
-                    h3_packed[rx_idx[7:0]] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd63) begin
+                    h3_packed[rx_idx[$clog2(D)-1:0]] <= obuf_rdata_reg;
+                    if (rx_idx == D-1) begin
                         gg_sh_h3_ch0 <= fq_shift_total;
                         rx_idx       <= 10'd0;
                         state        <= S_GG_SETUP_W3_CH1;
@@ -2674,7 +2690,7 @@ module top #(
                     rms_shift_w  <= gg_sh_h3;
                     op_sel       <= 4'd7;
                     fq_mode      <= 1'b1;
-                    fm_N         <= 7'd64;
+                    fm_N         <= D;
                     fm_row       <= 7'd0;
                     fetch_idx    <= 7'd0;
                     gg_qkv_phase <= 4'd9;
@@ -2684,8 +2700,8 @@ module top #(
                 S_GG_SAVE_H3_CH1_W1: state <= S_GG_SAVE_H3_CH1_W2;
                 S_GG_SAVE_H3_CH1_W2: state <= S_GG_SAVE_H3_CH1_WB;
                 S_GG_SAVE_H3_CH1_WB: begin
-                    h3_packed[8'd64 + rx_idx[7:0]] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd63) begin
+                    h3_packed[D + rx_idx[$clog2(D)-1:0]] <= obuf_rdata_reg;
+                    if (rx_idx == D-1) begin
                         gg_sh_h3_ch1 <= fq_shift_total;
                         rx_idx       <= 10'd0;
                         state        <= S_GG_SETUP_W3_CH2;
@@ -2700,7 +2716,7 @@ module top #(
                     rms_shift_w  <= gg_sh_h3;
                     op_sel       <= 4'd7;
                     fq_mode      <= 1'b1;
-                    fm_N         <= 7'd64;
+                    fm_N         <= D;
                     fm_row       <= 7'd0;
                     fetch_idx    <= 7'd0;
                     gg_qkv_phase <= 4'd10;
@@ -2710,8 +2726,8 @@ module top #(
                 S_GG_SAVE_H3_CH2_W1: state <= S_GG_SAVE_H3_CH2_W2;
                 S_GG_SAVE_H3_CH2_W2: state <= S_GG_SAVE_H3_CH2_WB;
                 S_GG_SAVE_H3_CH2_WB: begin
-                    h3_packed[8'd128 + rx_idx[7:0]] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd63) begin
+                    h3_packed[2*D + rx_idx[$clog2(D)-1:0]] <= obuf_rdata_reg;
+                    if (rx_idx == D-1) begin
                         gg_sh_h3_ch2  <= fq_shift_total;
                         rx_idx        <= 10'd0;
                         gg_silu_chunk <= 2'd0;
@@ -2725,7 +2741,7 @@ module top #(
                 // ---- v5e : silu chunked sur h1 (3 chunks de 64) ----
                 // Load h1_packed[chunk*64+idx] -> xbuf[idx]
                 S_GG_SILU_LOAD_RD: begin
-                    h1_raddr <= {gg_silu_chunk, rx_idx[5:0]};   // chunk*64 + idx
+                    h1_raddr <= {gg_silu_chunk, rx_idx[$clog2(D)-1:0]};   // chunk*64 + idx
                     state    <= S_GG_SILU_LOAD_W1;
                 end
                 S_GG_SILU_LOAD_W1: state <= S_GG_SILU_LOAD_WB;
@@ -2733,7 +2749,7 @@ module top #(
                     xbuf_waddr <= rx_idx;
                     xbuf_wdata <= h1_rdata_reg;
                     xbuf_we    <= 1'b1;
-                    if (rx_idx == 10'd63) begin
+                    if (rx_idx == D-1) begin
                         rx_idx <= 10'd0;
                         state  <= S_GG_SILU_START;
                     end else begin
@@ -2768,8 +2784,8 @@ module top #(
                 S_GG_SILU_SAVE_W1: state <= S_GG_SILU_SAVE_W2;
                 S_GG_SILU_SAVE_W2: state <= S_GG_SILU_SAVE_WB;
                 S_GG_SILU_SAVE_WB: begin
-                    silu_packed[{gg_silu_chunk, rx_idx[5:0]}] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd63) begin
+                    silu_packed[{gg_silu_chunk, rx_idx[$clog2(D)-1:0]}] <= obuf_rdata_reg;
+                    if (rx_idx == D-1) begin
                         state <= S_GG_SILU_NEXT;
                     end else begin
                         rx_idx <= rx_idx + 10'd1;
@@ -2805,13 +2821,13 @@ module top #(
                     state   <= S_GG_TX_SILUD;
                 end
                 S_GG_TX_SILUD: begin
-                    silu_raddr <= tx_idx[7:0];
+                    silu_raddr <= tx_idx[$clog2(CFG_HIDPAD)-1:0];
                     state      <= S_GG_TX_SILUDW;
                 end
                 S_GG_TX_SILUDW: if (!tx_busy && !tx_send) begin
                     tx_data <= silu_rdata_reg;
                     tx_send <= 1'b1;
-                    if (tx_idx == 10'd191) begin
+                    if (tx_idx == CFG_HIDPAD-1) begin
                         gg_active <= 1'b0;
                         state     <= S_IDLE;
                     end else begin
@@ -2844,7 +2860,7 @@ module top #(
                         h3_v   = {{8{h3_rdata_reg[7]}},   h3_rdata_reg};
                         prod_i32 = silu_v * h3_v;        // i16 * i16 = i32 (mais holds in 16 typically)
                         // Aligner au shift common via shift_extra du chunk
-                        case (gg_mult_i[7:6])
+                        case (gg_mult_i[$clog2(CFG_HIDPAD)-1 : $clog2(D)])
                             2'd0: sh_extra = sh_extra_0;
                             2'd1: sh_extra = sh_extra_1;
                             default: sh_extra = sh_extra_2;
@@ -2854,7 +2870,7 @@ module top #(
                         absp = prod_i32[31] ? (~prod_i32 + 32'd1) : prod_i32;
                         if (absp > gg_mult_max_abs) gg_mult_max_abs <= absp;
                     end
-                    if (gg_mult_i == 8'd191) begin
+                    if (gg_mult_i == CFG_HIDPAD-1) begin
                         // Pass 1 done. Lance Pass 2.
                         state <= S_GG_MULT2_INIT;
                     end else begin
@@ -2885,7 +2901,7 @@ module top #(
                                                             shifted[7:0];
                         h_gated_packed[gg_mult_i] <= clipped;
                     end
-                    if (gg_mult_i == 8'd191) begin
+                    if (gg_mult_i == CFG_HIDPAD-1) begin
                         gg_w2_chunk <= 2'd0;
                         rx_idx      <= 10'd0;
                         state       <= S_GG_W2_LOAD_RD;     // lance W2 chunked
@@ -2907,13 +2923,13 @@ module top #(
                     state   <= S_GG_TX_HGD;
                 end
                 S_GG_TX_HGD: begin
-                    h_gated_raddr <= tx_idx[7:0];
+                    h_gated_raddr <= tx_idx[$clog2(CFG_HIDPAD)-1:0];
                     state         <= S_GG_TX_HGDW;
                 end
                 S_GG_TX_HGDW: if (!tx_busy && !tx_send) begin
                     tx_data <= h_gated_rdata_reg;
                     tx_send <= 1'b1;
-                    if (tx_idx == 10'd191) begin
+                    if (tx_idx == CFG_HIDPAD-1) begin
                         gg_active <= 1'b0;
                         state     <= S_IDLE;
                     end else begin
@@ -2924,7 +2940,7 @@ module top #(
                 // ---- v5g : W2 chunked K + residual ----
                 // Load h_gated[chunk*64+i] -> xbuf[i]
                 S_GG_W2_LOAD_RD: begin
-                    h_gated_raddr <= {gg_w2_chunk, rx_idx[5:0]};
+                    h_gated_raddr <= {gg_w2_chunk, rx_idx[$clog2(D)-1:0]};
                     state         <= S_GG_W2_LOAD_W1;
                 end
                 S_GG_W2_LOAD_W1: state <= S_GG_W2_LOAD_WB;
@@ -2932,7 +2948,7 @@ module top #(
                     xbuf_waddr <= rx_idx;
                     xbuf_wdata <= h_gated_rdata_reg;
                     xbuf_we    <= 1'b1;
-                    if (rx_idx == 10'd63) begin
+                    if (rx_idx == D-1) begin
                         rx_idx <= 10'd0;
                         state  <= S_GG_SETUP_W2;
                     end else begin
@@ -2949,7 +2965,7 @@ module top #(
                     rms_shift_w     <= gg_sh_w2;
                     op_sel          <= 4'd7;
                     fq_mode         <= 1'b1;
-                    fm_N            <= 7'd64;
+                    fm_N            <= D;
                     fm_row          <= 7'd0;
                     fetch_idx       <= 7'd0;
                     gg_accumulate   <= (gg_w2_chunk != 2'd0);   // first chunk : start at 0
@@ -2965,8 +2981,8 @@ module top #(
                 S_GG_SAVE_P_W1: state <= S_GG_SAVE_P_W2;
                 S_GG_SAVE_P_W2: state <= S_GG_SAVE_P_WB;
                 S_GG_SAVE_P_WB: begin
-                    partials_packed[{gg_w2_chunk, rx_idx[5:0]}] <= obuf_rdata_reg;
-                    if (rx_idx == 10'd63) begin
+                    partials_packed[{gg_w2_chunk, rx_idx[$clog2(D)-1:0]}] <= obuf_rdata_reg;
+                    if (rx_idx == D-1) begin
                         case (gg_w2_chunk)
                             2'd0: gg_sh_p0 <= fq_shift_total;
                             2'd1: gg_sh_p1 <= fq_shift_total;
@@ -2996,19 +3012,19 @@ module top #(
                 end
                 // Lectures sequentielles BSRAM partials (p0, p1, p2)
                 S_GG_FFN_RES_RD: begin
-                    partials_raddr <= {2'd0, fq_idx[5:0]};
+                    partials_raddr <= {2'd0, fq_idx[$clog2(D)-1:0]};
                     state          <= S_GG_FRR_P0_W1;
                 end
                 S_GG_FRR_P0_W1: state <= S_GG_FRR_P0_R;
                 S_GG_FRR_P0_R: begin
                     gg_p0_temp     <= partials_rdata_reg;
-                    partials_raddr <= {2'd1, fq_idx[5:0]};
+                    partials_raddr <= {2'd1, fq_idx[$clog2(D)-1:0]};
                     state          <= S_GG_FRR_P1_W1;
                 end
                 S_GG_FRR_P1_W1: state <= S_GG_FRR_P1_R;
                 S_GG_FRR_P1_R: begin
                     gg_p1_temp     <= partials_rdata_reg;
-                    partials_raddr <= {2'd2, fq_idx[5:0]};
+                    partials_raddr <= {2'd2, fq_idx[$clog2(D)-1:0]};
                     state          <= S_GG_FRR_P2_W1;
                 end
                 S_GG_FRR_P2_W1: state <= S_GG_FRR_P2_R;
@@ -3030,7 +3046,7 @@ module top #(
                         x_extra  = gg_x_shift - sh_min;
                         begin: xsave_extract
                             reg signed [7:0] x_byte;
-                            x_byte = x_save_packed[fq_idx[5:0]*8 +: 8];
+                            x_byte = x_save_packed[fq_idx[$clog2(D)-1:0]*8 +: 8];
                             p0_i32 = $signed({{24{gg_p0_temp[7]}}, gg_p0_temp}) <<< p0_extra;
                             p1_i32 = $signed({{24{gg_p1_temp[7]}}, gg_p1_temp}) <<< p1_extra;
                             p2_i32 = $signed({{24{partials_rdata_reg[7]}}, partials_rdata_reg}) <<< p2_extra;
@@ -3041,10 +3057,10 @@ module top #(
                         absy = sum_i32[31] ? (~sum_i32 + 32'd1) : sum_i32;
                         if (absy > max_abs) max_abs <= absy;
                     end
-                    if (fq_idx == 7'd63) begin
+                    if (fq_idx == D-1) begin
                         op_sel       <= 4'd7;
                         fq_mode      <= 1'b1;
-                        fm_N         <= 7'd64;
+                        fm_N         <= D;
                         rms_shift_x  <= (gg_sh_p0 <= gg_sh_p1 && gg_sh_p0 <= gg_sh_p2 && gg_sh_p0 <= gg_x_shift) ? gg_sh_p0 :
                                         (gg_sh_p1 <= gg_sh_p2 && gg_sh_p1 <= gg_x_shift) ? gg_sh_p1 :
                                         (gg_sh_p2 <= gg_x_shift) ? gg_sh_p2 : gg_x_shift;
@@ -3076,13 +3092,13 @@ module top #(
                     state   <= S_GG_TX_H3D;
                 end
                 S_GG_TX_H3D: begin
-                    h3_raddr <= tx_idx[7:0];
+                    h3_raddr <= tx_idx[$clog2(CFG_HIDPAD)-1:0];
                     state    <= S_GG_TX_H3D_W;
                 end
                 S_GG_TX_H3D_W: if (!tx_busy && !tx_send) begin
                     tx_data <= h3_rdata_reg;
                     tx_send <= 1'b1;
-                    if (tx_idx == 10'd191) begin
+                    if (tx_idx == CFG_HIDPAD-1) begin
                         gg_active <= 1'b0;
                         state     <= S_IDLE;
                     end else begin
@@ -3110,13 +3126,13 @@ module top #(
                 end
                 // Pattern BSRAM-style : set h1_raddr immediatement, attente UART = settle
                 S_GG_TX_H1D: begin
-                    h1_raddr <= tx_idx[7:0];
+                    h1_raddr <= tx_idx[$clog2(CFG_HIDPAD)-1:0];
                     state    <= S_GG_TX_H1D_W;
                 end
                 S_GG_TX_H1D_W: if (!tx_busy && !tx_send) begin
                     tx_data <= h1_rdata_reg;
                     tx_send <= 1'b1;
-                    if (tx_idx == 10'd191) begin
+                    if (tx_idx == CFG_HIDPAD-1) begin
                         gg_active <= 1'b0;
                         state     <= S_IDLE;
                     end else begin
@@ -3145,7 +3161,7 @@ module top #(
                 S_GG_TX_XD_W: if (!tx_busy && !tx_send) begin
                     tx_data <= obuf_rdata_reg;
                     tx_send <= 1'b1;
-                    if (tx_idx == 10'd63) begin
+                    if (tx_idx == D-1) begin
                         gg_active <= 1'b0;
                         state     <= S_IDLE;
                     end else begin
@@ -3172,9 +3188,9 @@ module top #(
                     state   <= S_GG_TX_Q;
                 end
                 S_GG_TX_Q: if (!tx_busy && !tx_send) begin
-                    tx_data <= Q_packed[tx_idx[5:0]*8 +: 8];
+                    tx_data <= Q_packed[tx_idx[$clog2(D)-1:0]*8 +: 8];
                     tx_send <= 1'b1;
-                    if (tx_idx == 10'd63) begin tx_idx <= 10'd0; state <= S_GG_TX_KD; end
+                    if (tx_idx == D-1) begin tx_idx <= 10'd0; state <= S_GG_TX_KD; end
                     else tx_idx <= tx_idx + 10'd1;
                 end
                 S_GG_TX_KD: if (!tx_busy && !tx_send) begin
@@ -3242,9 +3258,9 @@ module top #(
                 end
                 // Multi-head TX : sends Out_packed (64 bytes) - source directe pas BSRAM
                 S_TX_MH_W: if (!tx_busy && !tx_send) begin
-                    tx_data <= Out_packed[tx_idx[5:0]*8 +: 8];
+                    tx_data <= Out_packed[tx_idx[$clog2(D)-1:0]*8 +: 8];
                     tx_send <= 1'b1;
-                    if (tx_idx == 10'd63) state <= S_IDLE;
+                    if (tx_idx == D-1) state <= S_IDLE;
                     else tx_idx <= tx_idx + 10'd1;
                 end
                 // ---- CN : Chain rmsnorm + matmul ----
@@ -3253,10 +3269,10 @@ module top #(
                 S_CN_SW_MM:  if (rx_pending) begin cn_sw_mm    <= $signed(rx_byte); state <= S_CN_RX_X;   end
                 S_CN_RX_X: if (rx_pending) begin
                     xbuf_waddr <= rx_idx; xbuf_wdata <= $signed(rx_byte); xbuf_we <= 1'b1;
-                    if (rx_idx == 10'd63) begin rx_idx <= 10'd0; state <= S_CN_N; end
+                    if (rx_idx == D-1) begin rx_idx <= 10'd0; state <= S_CN_N; end
                     else rx_idx <= rx_idx + 10'd1;
                 end
-                S_CN_N: if (rx_pending) begin fm_N <= rx_byte[6:0]; state <= S_CN_RA0; end
+                S_CN_N: if (rx_pending) begin fm_N <= rx_byte[$clog2(D):0]; state <= S_CN_RA0; end
                 // addr_rms (pour fetch rmsnorm w)
                 S_CN_RA0: if (rx_pending) begin sd_addr[7:0]    <= rx_byte;       state <= S_CN_RA1; end
                 S_CN_RA1: if (rx_pending) begin sd_addr[15:8]   <= rx_byte;       state <= S_CN_RA2; end
@@ -3285,7 +3301,7 @@ module top #(
                     xbuf_waddr <= rx_idx;
                     xbuf_wdata <= obuf_rdata_reg;
                     xbuf_we    <= 1'b1;
-                    if (rx_idx == 10'd63) begin
+                    if (rx_idx == D-1) begin
                         rx_idx <= 10'd0;
                         state  <= S_CN_SETUP_MM;
                     end else begin
