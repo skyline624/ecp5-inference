@@ -38,17 +38,26 @@ module silu_op #(
     output reg  signed [15:0] dbg_silu_int
 );
 
-    // LUT silu, 256 entrees Q4.11
-    reg signed [15:0] silu_lut [0:255];
+    // LUT silu, 256 entrees Q4.11 — migree en BRAM (DP16KD) via (* ram_style="block" *)
+    // + read registre 1 cycle (pattern gen_seq.v cos_rom/sin_rom). La FSM absorbe le +1
+    // cycle via l'etat S_LOOKUP_WAIT (S_LOOKUP presente l'addr, S_LOOKUP_WAIT capture q).
+    (* ram_style = "block" *) reg signed [15:0] silu_lut [0:255];
     initial $readmemh("silu_lut.hex", silu_lut);
+
+    // BRAM read port registre 1 cycle : adresse = lut_idx_w (wire, comme gen_seq.v rope_ridx).
+    // S_LOOKUP (x_rdata valide) amorce la lecture ; S_LOOKUP_WAIT capture silu_lut_q (bon
+    // 1 cycle apres — le reg addr_r aurait ajoute un cycle de trop, d'ou le wire direct).
+    reg signed [15:0] silu_lut_q;
+    always @(posedge clk) silu_lut_q <= silu_lut[lut_idx_w];
 
     localparam S_IDLE   = 3'd0,
                S_ADDR   = 3'd1,
                S_WAIT1  = 3'd2,
                S_WAIT2  = 3'd3,
                S_LOOKUP = 3'd4,
-               S_WB     = 3'd5,
-               S_DONE   = 3'd6;
+               S_LOOKUP_WAIT = 3'd5,
+               S_WB     = 3'd6,
+               S_DONE   = 3'd7;
 
     reg [2:0]  state;
     reg [9:0]  idx;
@@ -125,10 +134,15 @@ module silu_op #(
                 S_WAIT2: state <= S_LOOKUP;
 
                 S_LOOKUP: begin
-                    // x_rdata valide -> calcul comb de lut_idx_w
+                    // x_rdata valide -> lut_idx_w (wire) amorce la lecture BRAM (read registre 1 cycle)
                     lut_idx_reg <= lut_idx_w;
-                    silu_val    <= silu_lut[lut_idx_w];
-                    state       <= S_WB;
+                    state       <= S_LOOKUP_WAIT;
+                end
+
+                S_LOOKUP_WAIT: begin
+                    // BRAM read latency 1 cycle : silu_lut_q = silu_lut[addr presentee en S_LOOKUP]
+                    silu_val <= silu_lut_q;
+                    state    <= S_WB;
                 end
 
                 S_WB: begin

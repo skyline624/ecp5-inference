@@ -45,13 +45,17 @@ module softmax_op #(
     output reg  [15:0]       dbg_inv_sum
 );
 
-    // LUTs
-    reg [15:0] exp_lut [0:255];
-    reg [15:0] inv_lut [0:255];
-    initial begin
-        $readmemh("exp_lut.hex", exp_lut);
-        $readmemh("inv_lut.hex", inv_lut);
-    end
+    // LUTs migrees en BRAM (DP16KD) via shared_lut (module parametrable, pattern gen_seq.v).
+    // Adresse = wire combinatoire (exp_idx / inv_lut_idx), read registre 1 cycle -> la FSM
+    // absorbe la latence via un etat _WAIT supplementaire (cf. silu_op.v / rmsnorm_op.v).
+    wire [15:0] exp_q;
+    wire [15:0] inv_q;
+    shared_lut #(.HEX("exp_lut.hex")) u_exp_lut (
+        .clk(clk), .addr(exp_idx), .q(exp_q)
+    );
+    shared_lut #(.HEX("inv_lut.hex")) u_inv_lut (
+        .clk(clk), .addr(inv_lut_idx), .q(inv_q)
+    );
 
     // Storage exp_val (K_MAX entrees x 16-bit)
     reg [15:0] exp_val [0:K_MAX-1];
@@ -65,9 +69,11 @@ module softmax_op #(
                S_EXP_W1     = 5'd6,
                S_EXP_W2     = 5'd7,
                S_EXP_LOOKUP = 5'd8,
+               S_EXP_WAIT   = 5'd15, // BRAM read latency 1 cycle (exp_lut migree en DP16KD)
                S_EXP_STORE  = 5'd9,
                S_INV_NORM   = 5'd10,
                S_INV_LUT    = 5'd11,
+               S_INV_WAIT   = 5'd16, // BRAM read latency 1 cycle (inv_lut migree en DP16KD)
                S_NORM       = 5'd12,
                S_NORM_WB    = 5'd13,
                S_DONE       = 5'd14;
@@ -207,8 +213,12 @@ module softmax_op #(
                 S_EXP_W1: state <= S_EXP_W2;
                 S_EXP_W2: state <= S_EXP_LOOKUP;
                 S_EXP_LOOKUP: begin
-                    // exp_idx comb depuis x_rdata, max_val
-                    exp_curr <= exp_lut[exp_idx];
+                    // exp_idx (wire) amorce la lecture BRAM (read registre 1 cycle via shared_lut)
+                    state    <= S_EXP_WAIT;
+                end
+                S_EXP_WAIT: begin
+                    // exp_q = exp_lut[exp_idx presentee en S_EXP_LOOKUP] (1 cycle de latence BRAM)
+                    exp_curr <= exp_q;
                     state    <= S_EXP_STORE;
                 end
                 S_EXP_STORE: begin
@@ -230,10 +240,15 @@ module softmax_op #(
                     state     <= S_INV_LUT;
                 end
                 S_INV_LUT: begin
-                    inv_sum     <= inv_lut[inv_lut_idx];
-                    dbg_inv_sum <= inv_lut[inv_lut_idx];
+                    // inv_lut_idx (wire) amorce la lecture BRAM (read registre 1 cycle)
                     dbg_max     <= max_val;
                     idx         <= 10'd0;
+                    state       <= S_INV_WAIT;
+                end
+                S_INV_WAIT: begin
+                    // inv_q = inv_lut[inv_lut_idx presentee en S_INV_LUT] (1 cycle de latence BRAM)
+                    inv_sum     <= inv_q;
+                    dbg_inv_sum <= inv_q;
                     state       <= S_NORM;
                 end
 

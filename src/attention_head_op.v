@@ -65,13 +65,20 @@ module attention_head_op #(
     output reg  [15:0]        dbg_inv_sum
 );
 
-    // LUTs (memes que softmax_op)
-    reg [15:0] exp_lut [0:255];
-    reg [15:0] inv_lut [0:255];
-    initial begin
-        $readmemh("exp_lut.hex", exp_lut);
-        $readmemh("inv_lut.hex", inv_lut);
-    end
+    // LUTs migrees en BRAM (DP16KD) via shared_lut (memes tables que softmax_op, pattern gen_seq.v).
+    // Adresse = wire combinatoire (exp_idx / inv_lut_idx), read registre 1 cycle -> la FSM absorbe
+    // la latence via un etat _WAIT (cf. silu_op.v / rmsnorm_op.v / softmax_op.v).
+    // Cas particulier S_EXP_LOOP : exp_lut etait lu 2x dans le meme cycle (store ev_packed + sum_acc).
+    // En BRAM 1-port = 1 lecture/cycle -> on capture exp_q 1 fois dans S_EXP_WAIT, puis on l'utilise
+    // pour les 2 operations (store + sum) au cycle suivant.
+    wire [15:0] exp_q;
+    wire [15:0] inv_q;
+    shared_lut #(.HEX("exp_lut.hex")) u_exp_lut (
+        .clk(clk), .addr(exp_idx), .q(exp_q)
+    );
+    shared_lut #(.HEX("inv_lut.hex")) u_inv_lut (
+        .clk(clk), .addr(inv_lut_idx), .q(inv_q)
+    );
 
     // Storage interne PACKED : 1 reg plat de T_MAX*16 bits, part-select pour
     // indexer. Force Gowin a NE PAS inferer BSRAM (lecture 1-cycle staled).
@@ -113,7 +120,9 @@ module attention_head_op #(
                S_OUT_MULT     = 5'd22,
                S_OUT_NEXT_T   = 5'd23,
                S_OUT_STORE    = 5'd24,
-               S_DONE         = 5'd25;
+               S_DONE         = 5'd25,
+               S_EXP_WAIT     = 5'd26, // BRAM read latency 1 cycle (exp_lut, double lecture resolue)
+               S_INV_WAIT     = 5'd27; // BRAM read latency 1 cycle (inv_lut)
 
     reg [4:0]  state;
     reg [5:0]  t_idx;     // 0..T-1 (6 bits pour T_MAX=32)
@@ -316,8 +325,15 @@ module attention_head_op #(
                     state      <= S_EXP_LOOP;
                 end
                 S_EXP_LOOP: begin
-                    ev_packed[t_idx*16 +: 16] <= exp_lut[exp_idx];
-                    sum_acc <= sum_acc + {8'd0, exp_lut[exp_idx]};
+                    // exp_idx (wire, derive de score_curr/max_score stables) amorce la lecture BRAM
+                    // (read registre 1 cycle). La consommation (ev_packed + sum_acc) se fait en
+                    // S_EXP_WAIT -> 1 seule lecture BRAM pour les 2 usages (resolution double lecture).
+                    state <= S_EXP_WAIT;
+                end
+                S_EXP_WAIT: begin
+                    // exp_q = exp_lut[exp_idx presentee en S_EXP_LOOP] (1 cycle de latence BRAM)
+                    ev_packed[t_idx*16 +: 16] <= exp_q;
+                    sum_acc                    <= sum_acc + {8'd0, exp_q};
                     if (t_idx == T - 6'd1) begin
                         t_idx <= 6'd0;
                         state <= S_INV_NORM;
@@ -331,12 +347,17 @@ module attention_head_op #(
                 // ---- PHASE 1/sum ----
                 S_INV_NORM: state <= S_INV_LUT;
                 S_INV_LUT: begin
-                    inv_sum       <= inv_lut[inv_lut_idx];
-                    dbg_inv_sum   <= inv_lut[inv_lut_idx];
+                    // inv_lut_idx (wire) amorce la lecture BRAM (read registre 1 cycle)
                     dbg_exp_sum   <= sum_acc[15:0];
                     dbg_max_score <= max_score;
                     t_idx         <= 6'd0;
-                    state         <= S_NORM_INIT;
+                    state         <= S_INV_WAIT;
+                end
+                S_INV_WAIT: begin
+                    // inv_q = inv_lut[inv_lut_idx presentee en S_INV_LUT] (1 cycle de latence BRAM)
+                    inv_sum     <= inv_q;
+                    dbg_inv_sum <= inv_q;
+                    state       <= S_NORM_INIT;
                 end
 
                 // ---- PHASE NORMALIZE attn ----

@@ -34,6 +34,7 @@ $Extra = (@(
     "../src/silu_op.v",
     "../src/rope_op.v",
     "../src/softmax_op.v",
+    "../src/shared_lut.v",      # BRAM ROM 256x16 parametrable (exp_lut/inv_lut, migres depuis LUT-RAM)
     "../src/attention_head_op.v"
 ) -join ",")
 

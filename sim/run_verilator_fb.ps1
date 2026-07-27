@@ -31,7 +31,16 @@ param(
 )
 
 . C:\oss-cad-suite\environment.ps1
-$py = "C:\Users\User\AppData\Local\Programs\Python\Python312\python.exe"
+# Python : $env:PYTHON (force) > Get-Command python > fallback chemin hardcode.
+# Le wrapper original hardcodait C:\Users\User\... (machine = 'pc' ici, et le python
+# dispo est le Python 3.12 du Store avec numpy). On detecte donc dynamiquement pour
+# rester portable.
+if ($env:PYTHON -and (Test-Path $env:PYTHON)) {
+    $py = $env:PYTHON
+} else {
+    $gc = Get-Command python -ErrorAction SilentlyContinue
+    if ($gc) { $py = $gc.Source } else { $py = "C:\Users\User\AppData\Local\Programs\Python\Python312\python.exe" }
+}
 # stub Perl Pod::Usage pour le wrapper verilator (perl MSYS ecorche)
 $env:PERL5LIB = "$PSScriptRoot\vlib"
 Set-Location $PSScriptRoot
@@ -50,12 +59,22 @@ Write-Host "==> gen_tb_hex.py + gen_sdram_preload_hex.py (Dump=$Dump, NTOK=$Ntok
 & $py gen_tb_hex.py --dump $Dump --ntok $Ntok | Select-Object -Last 1
 & $py ..\host\gen_sdram_preload_hex.py | Select-Object -Last 1
 
+# ---- copie des 8 hex RTL (RoPE ROM + LUTs) vers sim/ : $readmemh les charge au runtime
+# relativement au CWD (sim/). Sans cette copie, Verilator 2-state laisse les ROM/LUT à 0
+# -> RoPE/softmax/rmsnorm/silu nuls -> logits=0 -> best_v=0 (bug sim-only ; le silicium
+# est OK car build.ps1 copie ces hex vers build/ et yosys les y résout). Source = lut/
+# (hex versionnés). Nécessaire pour HS=8 (LUTs) ET dim128 (LUTs + freq_cis_*_hs16).
+$rtlHex = @('freq_cis_cos_hs16.hex','freq_cis_sin_hs16.hex','freq_cis_cos.hex','freq_cis_sin.hex',
+            'exp_lut.hex','inv_lut.hex','rsqrt_lut.hex','silu_lut.hex')
+foreach ($h in $rtlHex) { Copy-Item "..\lut\$h" . -Force -ErrorAction SilentlyContinue }
+
 if (-not $SkipBuild) {
     # ---- Verilator --cc (untimed, top=gen_seq_top) ----
     $srcList = "models/ECP5_PLL_sim.v models/MULTALU18X18.v models/sdram_chip.v " +
                "models/flash_boot_sim.v " +
                "../src/node_top.v ../src/wcache_ffn.v ../src/sdram.v ../src/mac18.v " +
                "../src/rmsnorm_op.v ../src/silu_op.v ../src/rope_op.v ../src/softmax_op.v " +
+               "../src/shared_lut.v " +
                "../src/attention_head_op.v ../src/vec_alu2.v ../src/async_fifo.v " +
                "../src/uart_bridge.v ../src/gen_seq.v ../src/gen_seq_top.v"
     $defs = "-DLINK_SS -DSDRAM_PRELOAD -DSIM -DFLASH_BOOT"

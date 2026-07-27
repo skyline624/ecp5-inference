@@ -77,24 +77,53 @@ def build_image(m):
     HID = cfg['hidden_dim']
     V   = cfg['vocab_size']
 
+    # rework dim (e21d94b) : layout SDRAM CUMULATIF. DOIT matcher src/model_cfg.vh
+    # CFG_OFF_* (identique a host/gen_sdram_preload_hex.py). Les anciens offsets
+    # paddés en magic numbers (0x100, 0x1100, 0x1900...) etaient valides AVANT le
+    # rework dim ; depuis e21d94b le RTL lit aux offsets cumulatifs (OFF_WQ=D=0x40,
+    # OFF_WK=D+D*D=0x1040...) -> si on flashe encore l'image paddée, le RTL lit du
+    # padding (wq=0) -> attention cassee -> tokens "ow" constants sur silicium.
+    Dm  = cfg['dim']
+    H   = cfg['n_heads']
+    KH  = cfg['n_kv_heads']
+    HS  = cfg['head_size']
+    KVW = KH * HS
+    HIDPAD = ((HID + Dm - 1) // Dm) * Dm
+    NCHUNK = HIDPAD // Dm
+    MAT_SZ = NCHUNK * Dm * Dm
+    OFF_RMS_ATT = 0
+    OFF_WQ      = Dm
+    OFF_WK      = Dm + Dm*Dm
+    OFF_WV      = Dm + Dm*Dm + KVW*Dm
+    OFF_WO      = Dm + Dm*Dm + 2*KVW*Dm
+    OFF_RMSFF   = Dm + 2*Dm*Dm + 2*KVW*Dm
+    OFF_W1      = 2*Dm + 2*Dm*Dm + 2*KVW*Dm     # = OFF_RMSFF + Dm
+    OFF_W3      = OFF_W1 + MAT_SZ
+    OFF_W2      = OFF_W3 + MAT_SZ
+    LBASE   = 0x010000
+    LSTRIDE = 1 << (OFF_W1 + 3*MAT_SZ - 1).bit_length()  # next pow2 >= layer_sz
+    A_EMB      = 0x000000
+    A_RMSFINAL = LBASE + L * LSTRIDE
+    assert Dm == D, f"cfg dim {Dm} != transformer_ops D {D} (gen_flash_model est dim64-spec)"
+
     buf = bytearray(IMG_SIZE)
     sh  = {}  # collected shifts, keyed like sh_packet
 
-    # tok_emb [V, D] chunked @ 0x000000
+    # tok_emb [V, D] chunked @ A_EMB (put_chunked K=D<=FQ_K => row-major-equivalent)
     tok_i8, sh_emb = to_i8_shift(m['tok_emb'])
-    put_chunked(buf, 0x000000, tok_i8, V, D)
+    put_chunked(buf, A_EMB, tok_i8, V, D)
     sh['emb'] = sh_emb
 
-    # rms_final [D] @ 0x060000
+    # rms_final [D] @ A_RMSFINAL
     rf_i8, sh_rf = to_i8_shift(m['rms_final'])
-    put(buf, 0x060000, rf_i8.tobytes())
+    put(buf, A_RMSFINAL, rf_i8.tobytes())
     sh['rmsfinal'] = sh_rf
 
     # per-layer weights
     sw_rms, swq, swk, swv, swo = [], [], [], [], []
     sw_rmsf, sw1, sw3, sw2 = [], [], [], []
     for l in range(L):
-        base = 0x010000 + l * 0x10000
+        base = LBASE + l * LSTRIDE
 
         rms_att_i8, s_ra = to_i8_shift(m['rms_att'][l])
         wq_i8, s_q       = to_i8_shift(m['wq'][l])
@@ -106,15 +135,15 @@ def build_image(m):
         w3_i8, s_w3      = to_i8_shift(m['w3'][l])
         w2_i8, s_w2      = to_i8_shift(m['w2'][l])
 
-        put(buf, base + 0x0000, rms_att_i8.tobytes())
-        put(buf, base + 0x0100, wq_i8.reshape(-1).tobytes())
-        put(buf, base + 0x1100, wk_i8.reshape(-1).tobytes())
-        put(buf, base + 0x1900, wv_i8.reshape(-1).tobytes())
-        put(buf, base + 0x2100, wo_i8.reshape(-1).tobytes())
-        put(buf, base + 0x3100, rms_ffn_i8.tobytes())
-        put_chunked(buf, base + 0x3200, w1_i8, HID, D)
-        put_chunked(buf, base + 0x6200, w3_i8, HID, D)
-        put_chunked(buf, base + 0x9200, w2_i8, D, HID)
+        put(buf, base + OFF_RMS_ATT, rms_att_i8.tobytes())
+        put(buf, base + OFF_WQ, wq_i8.reshape(-1).tobytes())
+        put(buf, base + OFF_WK, wk_i8.reshape(-1).tobytes())
+        put(buf, base + OFF_WV, wv_i8.reshape(-1).tobytes())
+        put(buf, base + OFF_WO, wo_i8.reshape(-1).tobytes())
+        put(buf, base + OFF_RMSFF, rms_ffn_i8.tobytes())
+        put_chunked(buf, base + OFF_W1, w1_i8, HID, D)
+        put_chunked(buf, base + OFF_W3, w3_i8, HID, D)
+        put_chunked(buf, base + OFF_W2, w2_i8, D, HID)
 
         sw_rms.append(s_ra);  swq.append(s_q);  swk.append(s_k)
         swv.append(s_v);      swo.append(s_o);  sw_rmsf.append(s_rf)

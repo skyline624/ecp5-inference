@@ -53,9 +53,15 @@ module rmsnorm_op #(
     output reg  signed [7:0] dbg_apply_shift
 );
 
-    // LUT 1/sqrt(x) pour x dans [1, 2), Q1.15
-    reg [15:0] rsqrt_lut [0:255];
+    // LUT 1/sqrt(x) pour x dans [1, 2), Q1.15 — migree en BRAM (DP16KD) via (* ram_style="block" *)
+    // + read registre 1 cycle (pattern gen_seq.v cos_rom/sin_rom). La FSM absorbe le +1 cycle
+    // via S_LUT_WAIT (S_LUT amorce la lecture wire lut_index, S_LUT_WAIT capture q).
+    (* ram_style = "block" *) reg [15:0] rsqrt_lut [0:255];
     initial $readmemh("rsqrt_lut.hex", rsqrt_lut);
+
+    // BRAM read port registre 1 cycle : adresse = lut_index (wire, comme gen_seq.v rope_ridx)
+    reg [15:0] rsqrt_lut_q;
+    always @(posedge clk) rsqrt_lut_q <= rsqrt_lut[lut_index];
 
     // sqrt(2) en Q1.15 = 1.4142 * 32768 = 46341 = 0xB505
     localparam [15:0] SQRT2_Q15 = 16'hB505;
@@ -67,6 +73,7 @@ module rmsnorm_op #(
                S_SUM_DATA    = 4'd4,
                S_NORM        = 4'd5,
                S_LUT         = 4'd6,
+               S_LUT_WAIT    = 4'd14, // BRAM read latency 1 cycle (rsqrt_lut migree en DP16KD)
                S_PARITY      = 4'd7,
                S_APPLY_ADDR  = 4'd8,
                S_APPLY_WAIT1 = 4'd9,
@@ -189,9 +196,15 @@ module rmsnorm_op #(
                 end
 
                 S_LUT: begin
+                    // lut_index (wire) amorce la lecture BRAM (read registre 1 cycle)
                     dbg_shift_amt <= shift_amt;
-                    raw_inv       <= rsqrt_lut[lut_index];
-                    state         <= S_PARITY;
+                    state          <= S_LUT_WAIT;
+                end
+
+                S_LUT_WAIT: begin
+                    // rsqrt_lut_q = rsqrt_lut[lut_index presentee en S_LUT] (1 cycle de latence BRAM)
+                    raw_inv <= rsqrt_lut_q;
+                    state   <= S_PARITY;
                 end
 
                 S_PARITY: begin
