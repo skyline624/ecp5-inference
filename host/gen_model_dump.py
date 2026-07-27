@@ -66,7 +66,9 @@ def main():
     m = build_quantized_model(m_float)
 
     print("Forward nœud int8 bit-exact (17 tokens)...")
-    node_tokens = forward_node(m, 17)
+    # forward_node retourne (out, kmem, vmem, ksh, vsh) depuis l'ajout du prefill/KV-cache
+    # (prove_gen_node.forward_node). On ne garde que node_tokens (out) pour le dump.
+    node_tokens, _, _, _, _ = forward_node(m, 17)
     print(f"  node_tokens = {node_tokens}")
 
     print("Forward oracle float (17 tokens)...")
