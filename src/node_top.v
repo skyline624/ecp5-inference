@@ -147,6 +147,10 @@ module top #(
     // octets d'adresse sont recus). A dim256 le chunk 1 du lm_head est a 0x010000 : la
     // PREMIERE adresse tok_emb dont le champ sd_addr[20:16] est non nul.
     ,output wire [22:0] dbg_fm_addr
+    // 4 premiers octets de la LIGNE 0 du dernier matmul FQ (= dernier chunk du lm_head).
+    // Permet de comparer les poids REELLEMENT charges en wbuf a tok_emb[chunk*D] du dump :
+    // tranche entre 'lecture SDRAM fautive' et 'produit scalaire fautif'.
+    ,output wire [31:0] dbg_wrow0
 `endif
 );
 
@@ -178,6 +182,7 @@ module top #(
     reg  [22:0] sd_addr;
 `ifdef SIM
     reg  [22:0] dbg_fm_addr_r;      // sonde : adresse de depart du matmul FQ/FM
+    reg  [31:0] dbg_wrow0_r;        // sonde : 4 premiers octets de la ligne 0 du matmul
 `endif
     reg         sd_rd, sd_wr;
     reg  [7:0]  sd_din;
@@ -1291,6 +1296,7 @@ module top #(
 `ifdef SIM
     assign dbg_node_state = state;   // debug SIM-only : expose node FSM state
     assign dbg_fm_addr    = dbg_fm_addr_r;
+    assign dbg_wrow0      = dbg_wrow0_r;
 `endif
     reg [8:0] ret_state;
     reg [8:0] next_state;
@@ -1890,6 +1896,11 @@ module top #(
                     wbuf_waddr <= {3'd0, fetch_idx};
                     wbuf_wdata <= ffn_hit_q ? wcache_dout : sd_dout;
                     wbuf_we    <= 1'b1;
+`ifdef SIM
+                    // sonde : 4 premiers octets de la ligne 0 (poids reellement charges)
+                    if (fm_row == 0 && fetch_idx < 4)
+                        dbg_wrow0_r[fetch_idx[1:0]*8 +: 8] <= ffn_hit_q ? wcache_dout : sd_dout;
+`endif
                     sd_addr    <= sd_addr + 23'd1;
                     if (fetch_idx == D-1) begin
                         // line fetched -> pipelined dot via mac18 (no dot_acc init here :
