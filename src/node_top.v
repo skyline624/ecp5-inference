@@ -1188,8 +1188,16 @@ module top #(
     reg [7:0]          n_lo;               // dim-rework Phase 7 : N lo byte (protocole N sur 2 octets, D>255)
     reg [$clog2(D):0]  dot_k;
     reg signed [31:0] dot_acc;
-    // Stockage int32 pour requantize (FQ uniquement, N <= 64)
-    (* ram_style = "registers" *) reg signed [31:0] y_int32 [0:D-1];
+    // Stockage int32 pour requantize (FQ). NB : l'ancien commentaire disait
+    // "N <= 64", hypothese heritee du profil dim64 et perimee depuis dim128.
+    //
+    // ram_style="registers" RETIRE : il forcait D*32 bascules + un mux D:1 par
+    // lecture (8 192 bits a dim256, le plus gros array du design). Les trois
+    // lectures (S_FM_DOT_DRAIN, S_FQ_MAX_LOOP, S_FQ_REQ) sont combinatoires, donc
+    // yosys ne peut PAS mapper en DP16KD (pas de lecture async sur ce bloc) : il
+    // produit de la LUT-RAM, a semantique et timing identiques. Laisser yosys
+    // choisir est ici strictement meilleur que l'imposer.
+    reg signed [31:0] y_int32 [0:D-1];
 `ifdef SIM
     // Sim-only : y_int32 (reg array) non init -> X en icarus ; écrit par S_FM_STORE
     // avant lecture, mais si un matmul upstream produit X (cascade attention), y_int32
