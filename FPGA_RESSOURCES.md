@@ -298,6 +298,49 @@ capturer l'**ancien** `sov` → shift de requantification périmé sur le résid
 Correctif : `alu_sb<=alu_out_sh`. Localisé par banc différentiel (ancienne vs nouvelle ALU
 sur les mêmes vecteurs, 8 cas) qui a innocenté l'ALU et pointé l'intégration.
 
+### Suite appliquée à node_top (même journée)
+Le même anti-pattern a ensuite été traité dans `node_top`, en deux lots, chacun validé
+**sim 17/17 + silicium bit-exact** :
+
+1. **`x_save_packed` / `Out_packed` → arrays indexés** (`x_save`, `out_bytes`). Tous leurs
+   accès étaient déjà élément-par-élément : le part-select ne produisait qu'un démux `D:1`
+   en écriture et un mux `D:1` en lecture. Sûr par construction — une lecture asynchrone ne
+   peut pas aller en DP16KD, donc yosys produit de la LUT-RAM, sans latence (confirmé : même
+   nombre de cycles à l'unité près). dim256 : node_top 19 702 → 14 835 LUT (**−24,7 %**).
+2. **`y_int32` : retrait de `ram_style="registers"`** — une ligne, le plus gros gain.
+   L'attribut imposait `D·32` bascules **plus un mux `D:1` par lecture** sans nécessité (les
+   trois lectures sont combinatoires). dim256 : node_top 14 835 → **6 650** LUT (**−55 %**),
+   −8 167 bascules, soit exactement les 8 192 bits de l'array.
+
+> ⚠ **Vérification qui a failli manquer.** Sur `y_int32`, yosys mappe via `$__PDPW16KD_`,
+> donc en **bloc BRAM** — et non en LUT-RAM comme attendu (`DPR16X4` inchangé, `DP16KD` +1).
+> La justification « une lecture asynchrone ne peut pas aller en DP16KD » était **fausse**.
+> Or ce projet a déjà été mordu par un mapping BRAM à adresse enregistrée (donnée périmée
+> d'un cycle, cf. migration des tables), et **Verilator simule le RTL source, pas la
+> netlist** : la sim ne pouvait pas trancher. Le silicium a validé. **Règle générale : un
+> changement dont le risque est dans la synthèse, et non dans le RTL, exige une validation
+> silicium — la sim RTL n'est pas un arbitre valable.**
+
+> ⚠ **Contrepartie à dim64** : `y_int32` en BRAM consomme 1 DP16KD (101 → 102, soit 94 % du
+> budget) pour libérer de la LUT, qui n'est pas le mur à ce profil. C'est favorable à
+> dim128+ (BRAM à 18 %, LUT était le mur) et neutre-à-défavorable à dim64. Il reste 6 blocs,
+> donc ça passe ; si le budget BRAM dim64 redevient critique,
+> `(* ram_style = "distributed" *)` rend le bloc contre ~2 200 LUT.
+
+**`Q_packed` volontairement non migré** : `Q_flat = Q_packed[mh_h*HS*8 +: HS*8]` lit `HS`
+octets simultanément pour alimenter l'attention — besoin parallèle réel, contrairement à
+`vec_alu2`. En array il faudrait `HS` ports de lecture asynchrone, donc une duplication ×16
+de la mémoire à dim256. Le coût est ici justifié.
+
+### Bilan cumulé
+| | origine | final | gain |
+|---|---|---|---|
+| dim256 (`-noflatten`, LUT4+carry) | 55 571 (**126,7 %**) | **28 535 (65,1 %)** | **−48,7 %** |
+| dim64 (P&R silicium, Total LUT4) | 26 874 (61 %) | **20 325 (46 %)** | **−24,4 %** |
+
+dim256 est passé de « déborde le die, cluster requis » à **65 % d'occupation**. Le bit-exact
+a été vérifié à chaque étape : sim sur deux paliers, et trois validations silicium.
+
 ### Prochain gisement (non traité)
 À dim256, `top`/node_top pèse **19 702 LUT sur 40 197** (~49 % du design) et conserve le
 même anti-pattern : `y_int32` (`ram_style="registers"`, 8 192 bits à dim256, commentaire
