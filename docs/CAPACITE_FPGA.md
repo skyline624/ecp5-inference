@@ -39,11 +39,24 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > l'ECP5-45F — bitstream généré, 0 erreur, 91,5 % de logique, 36,67 MHz PASS. Le verdict
 > « déborde LUT / cluster requis » ne vaut plus pour ce palier.
 >
-> Restrictions : (a) 91,5 % de logique et 0,5 % de marge sur l'horloge IO → très tendu ;
-> (b) le **mur SDRAM subsiste** (13 Mo de poids > 8 Mo i9) donc dim=256 n'est pas exécutable
-> sur i9 stock sans weight-streaming ; (c) le bit-exact dim=256 reste non validé (drift
-> d'oracle préexistant, indépendant du rework). **dim=512 n'a pas été re-mesuré** après le
-> rework : les 189 % sont un chiffre d'avant, à refaire avant toute conclusion.
+> ⚠ **La colonne SDRAM de ce tableau est calculée pour vocab=32000** (tinyllamas), alors que
+> le projet construit **`CFG_VOCAB = 512`** par défaut (`model_cfg.vh:99` ; 32000 uniquement
+> sous le define `VOCAB32000`). Empreinte réelle des poids selon les formules `CFG_OFF_*` :
+>
+> | profil | **vocab=512 (build par défaut)** | vocab=32000 |
+> |---|---|---|
+> | dim=64 | 0,27 Mo | 2,19 Mo |
+> | dim=128 | 0,96 Mo | 4,81 Mo |
+> | **dim=256** | **3,64 Mo — tient dans 8 Mo** | 11,33 Mo |
+> | dim=512 | **14,16 Mo — ne tient pas** | 29,54 Mo |
+>
+> Autrement dit : **dim=256 n'a jamais eu de mur SDRAM sur le profil réellement construit.**
+> Le premier palier bloquant en mémoire est **dim=512**. Après le rework LUT du 30/07,
+> dim=256 est donc atteignable sur une seule i9 (die 65 %, poids 3,64 Mo).
+>
+> Restrictions restantes : (a) le bit-exact dim=256 n'est pas encore valide sur silicium ;
+> (b) **dim=512 n'a pas été re-mesuré** en LUT après le rework — les 189 % sont un chiffre
+> d'avant, à refaire ; son mur SDRAM (14,16 Mo), lui, est réel.
 
 ## Lecture : le mur se déplace BRAM → LUT
 

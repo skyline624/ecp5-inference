@@ -280,15 +280,30 @@ là où l'état antérieur documenté était `nextpnr fail` (LUT 112 %). Rapport
 1. **91,5 % de logique et 0,5 % de marge sur l'horloge IO** : ça route, mais c'est tendu.
    Une variation de process/température, ou tout ajout de logique, peut faire échouer le
    timing. À ne pas considérer comme un budget confortable.
-2. **Le modèle dim256 ne tient pas en SDRAM** : ~13 Mo de poids contre 8 Mo sur la i9. On a
-   désormais le *die*, pas la *mémoire* → dim256 n'est pas exécutable sur i9 stock sans
-   streaming des poids ou sharding. Le mur LUT est levé, le mur SDRAM subsiste.
+2. ~~**Le modèle dim256 ne tient pas en SDRAM** : ~13 Mo contre 8 Mo~~ — **FAUX, corrigé le
+   2026-07-30.** Les « ~13 Mo » de `docs/CAPACITE_FPGA.md` valent pour **vocab=32000**
+   (tinyllamas), alors que ce projet construit **`CFG_VOCAB = 512`** par défaut (32000 n'est
+   activé que par le define `VOCAB32000`). Empreinte réelle des poids, calculée sur les
+   formules `CFG_OFF_*` de `model_cfg.vh` :
+
+   | profil | vocab=512 (ce projet) | vocab=32000 |
+   |---|---|---|
+   | dim64 | 0,27 Mo | 2,19 Mo |
+   | dim128 | 0,96 Mo | 4,81 Mo |
+   | **dim256** | **3,64 Mo → tient** | 11,33 Mo → non |
+   | dim512 | 14,16 Mo → non | 29,54 Mo → non |
+
+   **dim256 tient donc largement dans les 8 Mo de la i9.** Le mur SDRAM commence à
+   **dim512**, pas à dim256.
 3. **Le bit-exact dim256 n'est pas validé** (drift d'oracle préexistant, cf. `CAPACITE_FPGA.md`).
    Le refactor est validé bit-exact à dim64 et dim128, pas à dim256.
 4. **BRAM à 18,5 %** : 88 blocs libres — large marge pour les migrations suivantes (node_top).
 
-Conséquence stratégique : le cluster tensor-parallel était requis pour **deux** murs (LUT et
-SDRAM) ; il ne l'est plus que pour **un** (SDRAM), qui admet aussi le weight-streaming.
+Conséquence stratégique : le cluster tensor-parallel était requis dès dim256 pour **deux**
+murs supposés (LUT et SDRAM). Le mur LUT est levé par ce rework, et le mur SDRAM n'existait
+pas à ce palier (3,64 Mo pour 8 Mo disponibles). **dim256 est donc atteignable sur une seule
+i9.** Le premier palier réellement bloquant devient **dim512** (14,16 Mo de poids), où le
+cluster ou le weight-streaming redeviennent nécessaires.
 
 ### Piège : fusionner des états supprime des délais implicites
 Fusionner `AST_A` dans `ALU_WAIT` a d'abord cassé le bit-exact (8 mismatch/17, divergence
