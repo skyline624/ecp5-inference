@@ -46,6 +46,7 @@ module gen_seq_top #(
     output wire [8:0]    dbg_node_state,   // debug SIM-only : node FSM state (localise hang)
     output wire [22:0]   dbg_fm_addr,      // debug SIM-only : adresse SDRAM du matmul FQ/FM
     output wire [31:0]   dbg_wrow0,        // debug SIM-only : 4 premiers poids de la ligne 0
+    output wire [22:0]   dbg_rdaddr,       // debug SIM-only : sd_addr effectif au 1er octet lu
     output wire [31:0]   dbg_best_v,       // debug SIM-only : argmax best_val final (v du token émis)
     output wire [15:0]   dbg_best_i,       // debug SIM-only : argmax best_idx final (= token émis)
     output wire signed [7:0] dbg_csh0,     // debug SIM-only : lm_head csh[0]
@@ -109,6 +110,7 @@ module gen_seq_top #(
     wire [8:0] dbg_node_state_w;                      // debug : node FSM state
     wire [22:0] dbg_fm_addr_w;                        // debug : adresse matmul FQ/FM
     wire [31:0] dbg_wrow0_w;                          // debug : poids ligne 0
+    wire [22:0] dbg_rdaddr_w;                         // debug : sd_addr effectif
     wire [31:0] dbg_best_v_w;                         // debug : argmax best_val final
     wire [15:0]  dbg_best_i_w;                         // debug : argmax best_idx final
     wire signed [7:0] dbg_csh0_w, dbg_csh1_w, dbg_sref_lm_w;   // debug : shifts lm_head
@@ -119,6 +121,7 @@ module gen_seq_top #(
     assign dbg_node_state = dbg_node_state_w;
     assign dbg_fm_addr = dbg_fm_addr_w;
     assign dbg_wrow0 = dbg_wrow0_w;
+    assign dbg_rdaddr = dbg_rdaddr_w;
     assign dbg_best_v = dbg_best_v_w;
     assign dbg_best_i = dbg_best_i_w;
     assign dbg_csh0 = dbg_csh0_w;
@@ -191,6 +194,7 @@ module gen_seq_top #(
         ,.dbg_node_state(dbg_node_state_w)
         ,.dbg_fm_addr(dbg_fm_addr_w)
         ,.dbg_wrow0(dbg_wrow0_w)
+        ,.dbg_rdaddr(dbg_rdaddr_w)
 `endif
 `ifdef FLASH_BOOT
         ,// FLASH_BOOT mock : flash_* (SPI pins, unused en sim), shifts (drive_shifts

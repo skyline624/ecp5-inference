@@ -108,13 +108,14 @@ int main(int argc, char** argv) {
             // directement des logits "valides mais faux" sur ce chunk.
             unsigned fma = (unsigned)(top->dbg_fm_addr & 0x7FFFFF);
             unsigned wr0 = (unsigned)top->dbg_wrow0;   // 4 premiers poids de la ligne 0
+            unsigned rda = (unsigned)(top->dbg_rdaddr & 0x7FFFFF);  // sd_addr effectif
             if (tok != (int)expect[got]) {
-                printf("MISMATCH tok[%d]=%d expect=%d  (rtl best_i=%d best_v=%d) sh=%d csh=[%d,%d] sref=%d chunk1_max=%d@%d fm_addr=0x%06x wrow0=%08x XB=%s\n",
-                       got, tok, (int)expect[got], bi, bv, sh, c0, c1, sr, bv1, bi1, fma, wr0, hexbuf);
+                printf("MISMATCH tok[%d]=%d expect=%d  (rtl best_i=%d best_v=%d) sh=%d csh=[%d,%d] sref=%d chunk1_max=%d@%d fm_addr=0x%06x rdaddr=0x%06x wrow0=%08x XB=%s\n",
+                       got, tok, (int)expect[got], bi, bv, sh, c0, c1, sr, bv1, bi1, fma, rda, wr0, hexbuf);
                 mismatch++;
             } else {
-                printf("tok[%d]=%d OK  (best_i=%d best_v=%d) sh=%d csh=[%d,%d] sref=%d chunk1_max=%d@%d fm_addr=0x%06x wrow0=%08x XB=%s\n",
-                       got, tok, bi, bv, sh, c0, c1, sr, bv1, bi1, fma, wr0, hexbuf);
+                printf("tok[%d]=%d OK  (best_i=%d best_v=%d) sh=%d csh=[%d,%d] sref=%d chunk1_max=%d@%d fm_addr=0x%06x rdaddr=0x%06x wrow0=%08x XB=%s\n",
+                       got, tok, bi, bv, sh, c0, c1, sr, bv1, bi1, fma, rda, wr0, hexbuf);
             }
             got++;
         }

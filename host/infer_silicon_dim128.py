@@ -70,7 +70,14 @@ def build_regions(m):
         'w2':      2 * D + 2 * D * D + 2 * KVW * D + 2 * NCHUNK * D * D,
     }
     layer_sz = OFF['w1'] + 3 * NCHUNK * D * D
-    LBASE = 0x010000
+    # LBASE doit etre >= la taille de tok_emb (VOCAB*D octets, place a A_EMB=0), sinon
+    # les poids de la couche 0 ecrasent la fin de l'embedding. Fige a 0x010000, ce plan
+    # memoire cassait dim256 (512*256 = 0x20000 > 0x10000) : le chunk 1 du lm_head lisait
+    # rms_att/WQ au lieu de tok_emb[256..511]. Plancher a 0x010000 pour ne rien changer a
+    # dim64/dim128 (valides bit-exact sur silicium). Doit rester identique a
+    # src/model_cfg.vh CFG_LBASE.
+    _EMB_SZ = VOCAB * D
+    LBASE = 0x010000 if _EMB_SZ <= 0x010000 else (1 << (_EMB_SZ - 1).bit_length())
     LSTRIDE = 1 << (layer_sz - 1).bit_length() if layer_sz > 1 else 1   # next pow2 >= layer_sz
     A_EMB = 0x000000
     A_RMSFINAL = LBASE + NL * LSTRIDE

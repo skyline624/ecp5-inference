@@ -149,7 +149,23 @@ localparam CFG_OFF_W2    = CFG_OFF_W3 + CFG_MAT_SZ;
 localparam CFG_FFN_LO  = CFG_OFF_W1;
 localparam CFG_FFN_HI  = CFG_OFF_W1 + CFG_WCACHE_LAYER_SZ;
 // layout SDRAM global (paramétrique) : embedding@0, LBASE au-dessus, RMSFINAL+KV après
-localparam CFG_LBASE   = 'h010000;
+//
+// ⚠ CFG_LBASE était figé à 'h010000 alors que tok_emb occupe VOCAB*D octets DEPUIS 0 :
+//     dim64  : 512*64  = 0x08000  <  0x10000   ok
+//     dim128 : 512*128 = 0x10000  == 0x10000   ok (finit pile où LBASE commence)
+//     dim256 : 512*256 = 0x20000  >  0x10000   COLLISION : les poids de la couche 0
+//              écrasaient la 2e moitié de tok_emb, donc exactement le chunk 1 du
+//              lm_head (logits[256..511] calculés sur rms_att/WQ au lieu de tok_emb).
+//     dim512 : 512*512 = 0x40000  >  0x10000   idem, pire.
+// Symptôme observé à dim256 : sim ET silicium retournaient le max du chunk 0 (l'oracle
+// Python, lui, n'a pas de layout SDRAM -> il était correct). Le RTL lisait fidèlement
+// une SDRAM mal remplie ; ni le RTL ni l'oracle n'étaient en cause, mais ce plan mémoire.
+// LBASE dérive donc maintenant de la taille réelle de l'embedding, arrondie à la
+// puissance de 2 supérieure, avec un plancher à 0x010000 pour ne RIEN changer à dim64
+// et dim128 (tous deux validés bit-exact sur silicium).
+localparam CFG_EMB_SZ  = CFG_VOCAB*CFG_D;                     // octets de tok_emb @ A_EMB=0
+localparam CFG_LBASE   = (CFG_EMB_SZ <= 'h010000) ? 'h010000
+                                                  : (1 << $clog2(CFG_EMB_SZ));
 // LSTRIDE = next pow2 >= taille couche (OFF_W1 + 3*MAT_SZ) -> 0x10000 dim 64, 0x40000 dim 128
 localparam CFG_LSTRIDE = 1 << $clog2(CFG_OFF_W1 + 3*CFG_MAT_SZ);
 localparam CFG_A_EMB      = 'h000000;                          // tok_emb @ 0 (VOCAB*D octets)

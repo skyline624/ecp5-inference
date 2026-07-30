@@ -151,6 +151,9 @@ module top #(
     // Permet de comparer les poids REELLEMENT charges en wbuf a tok_emb[chunk*D] du dump :
     // tranche entre 'lecture SDRAM fautive' et 'produit scalaire fautif'.
     ,output wire [31:0] dbg_wrow0
+    // sd_addr EFFECTIF au moment ou le 1er octet de la ligne 0 est ecrit dans wbuf.
+    // dbg_fm_addr reconstruit l'adresse RECUE ; celle-ci est celle REELLEMENT utilisee.
+    ,output wire [22:0] dbg_rdaddr
 `endif
 );
 
@@ -183,6 +186,7 @@ module top #(
 `ifdef SIM
     reg  [22:0] dbg_fm_addr_r;      // sonde : adresse de depart du matmul FQ/FM
     reg  [31:0] dbg_wrow0_r;        // sonde : 4 premiers octets de la ligne 0 du matmul
+    reg  [22:0] dbg_rdaddr_r;       // sonde : sd_addr REEL au 1er octet lu (vs adresse recue)
 `endif
     reg         sd_rd, sd_wr;
     reg  [7:0]  sd_din;
@@ -1297,6 +1301,7 @@ module top #(
     assign dbg_node_state = state;   // debug SIM-only : expose node FSM state
     assign dbg_fm_addr    = dbg_fm_addr_r;
     assign dbg_wrow0      = dbg_wrow0_r;
+    assign dbg_rdaddr     = dbg_rdaddr_r;
 `endif
     reg [8:0] ret_state;
     reg [8:0] next_state;
@@ -1900,6 +1905,8 @@ module top #(
                     // sonde : 4 premiers octets de la ligne 0 (poids reellement charges)
                     if (fm_row == 0 && fetch_idx < 4)
                         dbg_wrow0_r[fetch_idx[1:0]*8 +: 8] <= ffn_hit_q ? wcache_dout : sd_dout;
+                    // sonde : adresse EFFECTIVE du 1er octet (sd_addr tel quel, non reconstruit)
+                    if (fm_row == 0 && fetch_idx == 0) dbg_rdaddr_r <= sd_addr;
 `endif
                     sd_addr    <= sd_addr + 23'd1;
                     if (fetch_idx == D-1) begin
