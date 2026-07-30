@@ -87,6 +87,19 @@ module gen_seq #(
     output [11:0]         dbg_idx,         // debug SIM-only : idx octet paquet / rcnt recv
     output [31:0]         dbg_best_v,      // debug SIM-only : argmax best_val final (v du token émis)
     output [TBITS-1:0]    dbg_best_i,      // debug SIM-only : argmax best_idx final (= token émis)
+    // Sondes lm_head : shifts de requantification par chunk (csh) + sref_lm retenu.
+    // L'argmax compare des logits de chunks differents en les realignant par
+    // (sref_lm - csh[chunk]) : si csh diverge de l'oracle, un chunk entier est
+    // ecrase au realignement et ne peut plus gagner. Necessaire pour departager
+    // "logits du chunk faux" de "csh du chunk faux" a dim>=128 (NCHUNK>1).
+    output signed [7:0]   dbg_csh0,        // debug SIM-only : csh[0]
+    output signed [7:0]   dbg_csh1,        // debug SIM-only : csh[1] (NCHUNK>=2)
+    output signed [7:0]   dbg_sref_lm,     // debug SIM-only : max(csh) utilise par l'argmax
+    // Argmax restreint au CHUNK 1 : montre ce que le RTL voit reellement dans le
+    // second chunk de logits, sans dependre du gagnant global. Permet de distinguer
+    // "chunk 1 nul / trop petit" de "chunk 1 correct mais jamais gagnant".
+    output signed [31:0]  dbg_bv1,         // debug SIM-only : max(v) sur le chunk 1
+    output [TBITS-1:0]    dbg_bi1,         // debug SIM-only : indice de ce max
 `endif
     // ---- KV cache maître SDRAM direct (étape 1 KV→SDRAM, plan §2.2) ----
     // kmem/vmem (BRAM 10 Ko, 6 DP16KD) déplacés en SDRAM @ KV_BASE. ksh/vsh
@@ -164,6 +177,11 @@ module gen_seq #(
     reg signed [31:0] best_val;
     reg [TBITS-1:0] amax_i, best_idx;
     reg [LBITS:0] scan_c;
+`ifdef SIM
+    // Argmax SIM-only restreint au chunk 1 (cf. dbg_bv1/dbg_bi1).
+    reg signed [31:0] bv1_r;
+    reg [TBITS-1:0]   bi1_r;
+`endif
 
     // ---- ss_link byte adapters ----
     reg  [7:0] tx_data; reg tx_send; wire tx_busy;
@@ -270,6 +288,11 @@ module gen_seq #(
     assign dbg_idx = idx;      // debug SIM-only : idx octet paquet (E_SET) / rcnt recv
     assign dbg_best_v = best_val;  // argmax best_val final (v du token émis)
     assign dbg_best_i = best_idx;  // argmax best_idx final (= token émis)
+    assign dbg_csh0    = csh[0];
+    assign dbg_csh1    = (NCHUNK > 1) ? csh[1] : 8'sd0;
+    assign dbg_sref_lm = sref_lm;
+    assign dbg_bv1     = bv1_r;
+    assign dbg_bi1     = bi1_r;
 `endif
     reg [1:0] kv_refresh_ret;  // 0 = read (E_MREQ), 1 = write K (KVWR), 2 = write V (KVWR_V)
     // compteur temps bus KV (PH_MM/KVWR) -> refresh auto toutes les ~15µs (375 cyc @25MHz)
@@ -784,6 +807,9 @@ module gen_seq #(
                 AMAX_INIT: begin
                     sref_lm <= csh[0]; scan_c <= 1;
                     best_val <= -32'sd2147483647; best_idx <= 0; amax_i <= 0;
+`ifdef SIM
+                    bv1_r <= -32'sd2147483647; bi1_r <= 0;   // sonde chunk 1
+`endif
                     st <= AMAX;
                 end
                 AMAX: begin   // scan max(csh) into sref_lm ; amax_i stays 0 -> lraw = logits[0]
@@ -798,6 +824,10 @@ module gen_seq #(
                     reg signed [31:0] v;
                     v = $signed(lraw) >>> (sref_lm - csh[amax_i >> $clog2(D)]);
                     if (v > best_val) begin best_val <= v; best_idx <= amax_i; end
+`ifdef SIM
+                    // meme comparaison, restreinte au chunk 1 (sonde, sans effet fonctionnel)
+                    if ((amax_i >> $clog2(D)) == 1 && v > bv1_r) begin bv1_r <= v; bi1_r <= amax_i; end
+`endif
                     if (amax_i==VOCAB-1) begin
                         token <= best_idx;
                         if (gen_mode) begin

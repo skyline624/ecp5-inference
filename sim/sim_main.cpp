@@ -96,11 +96,20 @@ int main(int argc, char** argv) {
                 char tmp[9]; snprintf(tmp,9,"%08x",(unsigned)wd); strcat(hexbuf,tmp);
                 if (w+1 < XB_WORDS) strcat(hexbuf," ");
             }
+            // Sondes lm_head : csh[0]/csh[1] (shifts de requantification par chunk) et
+            // sref_lm=max(csh). L'argmax realigne par (sref_lm - csh[chunk]) : un csh
+            // errone ecrase tout un chunk et l'empeche de gagner, sans que XB bouge.
+            int c0 = (int)(int8_t)(top->dbg_csh0 & 0xFF);
+            int c1 = (int)(int8_t)(top->dbg_csh1 & 0xFF);
+            int sr = (int)(int8_t)(top->dbg_sref_lm & 0xFF);
+            int bv1 = (int)top->dbg_bv1; int bi1 = (int)(top->dbg_bi1 & 0xFFFF);
             if (tok != (int)expect[got]) {
-                printf("MISMATCH tok[%d]=%d expect=%d  (rtl best_i=%d best_v=%d) sh=%d XB=%s\n", got, tok, (int)expect[got], bi, bv, sh, hexbuf);
+                printf("MISMATCH tok[%d]=%d expect=%d  (rtl best_i=%d best_v=%d) sh=%d csh=[%d,%d] sref=%d chunk1_max=%d@%d XB=%s\n",
+                       got, tok, (int)expect[got], bi, bv, sh, c0, c1, sr, bv1, bi1, hexbuf);
                 mismatch++;
             } else {
-                printf("tok[%d]=%d OK  (best_i=%d best_v=%d) sh=%d XB=%s\n", got, tok, bi, bv, sh, hexbuf);
+                printf("tok[%d]=%d OK  (best_i=%d best_v=%d) sh=%d csh=[%d,%d] sref=%d chunk1_max=%d@%d XB=%s\n",
+                       got, tok, bi, bv, sh, c0, c1, sr, bv1, bi1, hexbuf);
             }
             got++;
         }

@@ -46,6 +46,11 @@ module gen_seq_top #(
     output wire [8:0]    dbg_node_state,   // debug SIM-only : node FSM state (localise hang)
     output wire [31:0]   dbg_best_v,       // debug SIM-only : argmax best_val final (v du token émis)
     output wire [15:0]   dbg_best_i,       // debug SIM-only : argmax best_idx final (= token émis)
+    output wire signed [7:0] dbg_csh0,     // debug SIM-only : lm_head csh[0]
+    output wire signed [7:0] dbg_csh1,     // debug SIM-only : lm_head csh[1]
+    output wire signed [7:0] dbg_sref_lm,  // debug SIM-only : max(csh) de l'argmax
+    output wire signed [31:0] dbg_bv1,     // debug SIM-only : max(v) sur le chunk 1
+    output wire [15:0]   dbg_bi1,          // debug SIM-only : indice de ce max
 `endif
     // sonde sim-only : cache FFN BRAM rempli (path silicium FLASH_BOOT). Permet au
     // TB Verilog pur / au TB C++ Verilator d'attendre le fill SANS ref hierarchique
@@ -102,12 +107,19 @@ module gen_seq_top #(
     wire [8:0] dbg_node_state_w;                      // debug : node FSM state
     wire [31:0] dbg_best_v_w;                         // debug : argmax best_val final
     wire [15:0]  dbg_best_i_w;                         // debug : argmax best_idx final
+    wire signed [7:0] dbg_csh0_w, dbg_csh1_w, dbg_sref_lm_w;   // debug : shifts lm_head
+    wire signed [31:0] dbg_bv1_w;  wire [15:0] dbg_bi1_w;      // debug : argmax chunk 1
     assign dbg_st = dbg_st_w;                         // sonde SIM-only (localise hang)
     assign dbg_phase = dbg_phase_w;
     assign dbg_idx = dbg_idx_w;
     assign dbg_node_state = dbg_node_state_w;
     assign dbg_best_v = dbg_best_v_w;
     assign dbg_best_i = dbg_best_i_w;
+    assign dbg_csh0 = dbg_csh0_w;
+    assign dbg_csh1 = dbg_csh1_w;
+    assign dbg_sref_lm = dbg_sref_lm_w;
+    assign dbg_bv1 = dbg_bv1_w;
+    assign dbg_bi1 = dbg_bi1_w;
 `endif
 
     // rework dim Phase 1 : .D(CFG_D)/.NL(CFG_NL)/.NPOS(CFG_NPOS) (était .D(D) local défaut 64
@@ -140,6 +152,11 @@ module gen_seq_top #(
         ,.dbg_idx(dbg_idx_w)
         ,.dbg_best_v(dbg_best_v_w)
         ,.dbg_best_i(dbg_best_i_w)
+        ,.dbg_csh0(dbg_csh0_w)
+        ,.dbg_csh1(dbg_csh1_w)
+        ,.dbg_sref_lm(dbg_sref_lm_w)
+        ,.dbg_bv1(dbg_bv1_w)
+        ,.dbg_bi1(dbg_bi1_w)
 `endif
         );
 
