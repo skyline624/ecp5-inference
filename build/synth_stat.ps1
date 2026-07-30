@@ -6,14 +6,16 @@
 # attention_head_op / shared_lut) + stat hierarchique.
 #
 # Usage :
-#   .\synth_stat.ps1 -Tag baseline    # avant migration (git stash des 4 modules)
-#   .\synth_stat.ps1 -Tag after       # apres migration (working tree)
+#   .\synth_stat.ps1 -Tag dim64             # profil defaut (cache FFN cache-all, mur BRAM)
+#   .\synth_stat.ps1 -Tag dim128 -Dim 128   # profil dim128 (CFG_NC=0, stream SDRAM)
 #
-# Comparaison : le total LUT (LUT4) doit baisser de ~1-2k, et DP16KD (BRAM)
-# doit augmenter de 6 (silu + rsqrt + 2x exp + 2x inv) entre baseline et after.
+# -Dim selectionne le profil model_cfg.vh (64 = aucun define, sinon -DDIM<n>). Le
+# profil change radicalement le compte BRAM : en dim64 CFG_NC=5 (cache-all) donne
+# ~90 DP16KD pour wcache_ffn, en dim128+ CFG_NC=0 (stream) le reduit a 1.
 # =============================================================================
 param(
     [Parameter(Mandatory=$true)][string]$Tag,
+    [ValidateSet("64","128","256","512")][string]$Dim = "64",
     [string]$Top = "gen_seq_silicon"
 )
 $ErrorActionPreference = "Continue"
@@ -46,7 +48,8 @@ $Files = @(
     "../src/shared_lut.v",
     "../src/attention_head_op.v"
 )
-$Defs = "-DNODE_ONLY -DFLASH_BOOT -DCLUSTER_NODE -DDIM128"
+$Defs = "-DNODE_ONLY -DFLASH_BOOT -DCLUSTER_NODE"
+if ($Dim -ne "64") { $Defs += " -DDIM$Dim" }   # dim64 = profil defaut model_cfg.vh (aucun define)
 $Inc  = "-I../src -I../board"
 
 # Construit la commande yosys : read_verilog par fichier + hierarchy + proc + opt + synth_ecp5 -noflatten + stat

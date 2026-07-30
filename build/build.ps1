@@ -60,8 +60,13 @@ yosys -l "$Top.ys.log" -p "$readCmd; synth_ecp5 -top $Top -json $Top.json"
 if ($LASTEXITCODE -ne 0) { throw "yosys failed" }
 
 Write-Host "==> nextpnr-ecp5 (P&R)" -ForegroundColor Cyan
+# --write : full place-and-route JSON (cell placement + routing) for nextpnr-viewer
+#   (https://edacation.github.io/nextpnr-viewer/). Load $Top.pnr.json + $Top.rpt into
+#   the viewer to render the design on the ECP5 die (slices/BRAM/DSP placement).
+# --report : timing/utilization report JSON (also consumed by the viewer).
 $npArgs = @("--package","CABGA381","--speed","6","--json","$Top.json",
-            "--lpf","$Lpf","--textcfg","$Top.config","--report","$Top.rpt")
+            "--lpf","$Lpf","--textcfg","$Top.config",
+            "--write","$Top.pnr.json","--report","$Top.rpt")
 if (-not $NoAllowUnconstrained) { $npArgs += "--lpf-allow-unconstrained" }
 & nextpnr-ecp5 @npArgs
 if ($LASTEXITCODE -ne 0) { throw "nextpnr failed" }
