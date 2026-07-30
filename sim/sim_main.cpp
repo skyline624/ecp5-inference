@@ -85,12 +85,16 @@ int main(int argc, char** argv) {
             int bv = (int)(top->dbg_best_v & 0xFFFFFFFF);
             int bi = (int)(top->dbg_best_i & 0xFFFF);   // couvre VOCAB<=65536 (32000)
             int sh = (int)(top->result_sh & 0xFF);
-            // XB (result) : 32 mots uint32 little-endian par octet (match oracle diag)
+            // XB (result) : XB_WORDS mots uint32 little-endian par octet (match oracle diag).
+            // Le separateur etait conditionne par `w<31`, hardcode pour 32 mots : au-dela
+            // (XB_WORDS=64 en dim256, 128 en dim512) les mots 32+ sortaient CONCATENES sans
+            // espace, donc impossibles a reparser -> tout diagnostic XB au-dela de dim128
+            // comparait en fait la mauvaise moitie du vecteur.
             char hexbuf[XB_WORDS*9+1]; hexbuf[0]=0;
             for (int w=0; w<XB_WORDS; w++) {
                 uint32_t wd = top->result[w];
                 char tmp[9]; snprintf(tmp,9,"%08x",(unsigned)wd); strcat(hexbuf,tmp);
-                if (w<31) strcat(hexbuf," ");
+                if (w+1 < XB_WORDS) strcat(hexbuf," ");
             }
             if (tok != (int)expect[got]) {
                 printf("MISMATCH tok[%d]=%d expect=%d  (rtl best_i=%d best_v=%d) sh=%d XB=%s\n", got, tok, (int)expect[got], bi, bv, sh, hexbuf);

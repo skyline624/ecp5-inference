@@ -15,10 +15,15 @@ import prove_gen_node as P
 
 
 def xb_hex(xb_i8):
-    """128 int8 -> 32 mots uint32 %08x sep par espace (match sim_main.cpp XB=)."""
+    """D int8 -> D/4 mots uint32 %08x sep par espace (match sim_main.cpp XB=).
+
+    Le nombre de mots etait fige a 32 (=128 octets) : a dim256/512 l'oracle ne dumpait
+    que la PREMIERE MOITIE (voire le quart) du vecteur, rendant toute comparaison
+    XB oracle/RTL trompeuse au-dela de dim128. Derive maintenant de la taille reelle.
+    """
     x = np.asarray(xb_i8, dtype=np.int8).astype(np.uint8)
     words = []
-    for w in range(32):
+    for w in range(len(x) // 4):
         b0, b1, b2, b3 = int(x[4*w]), int(x[4*w+1]), int(x[4*w+2]), int(x[4*w+3])
         val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
         words.append(f"{val:08x}")

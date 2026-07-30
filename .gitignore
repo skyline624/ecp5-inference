@@ -98,3 +98,8 @@ sim/compile_err.txt
 # place-and-route ECP5, alimente par build.ps1 --write <top>.pnr.json.
 # A cloner soi-meme : git clone https://github.com/edacation/nextpnr-viewer tools/nextpnr-viewer
 tools/
+
+# ---- dumps de diagnostic XB (regenerables via diag_oracle_dim128.py / la sim) ----
+host/oracle_xb_*.txt
+sim/dim*_full.txt
+sim/dim*_tokens.txt

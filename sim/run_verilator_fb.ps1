@@ -149,5 +149,11 @@ $sw3 = [System.Diagnostics.Stopwatch]::StartNew()
 $out = & ".\vobj\tb_verilator.exe" 2>&1
 $rc = $LASTEXITCODE
 $sw3.Stop()
+# Sortie COMPLETE conservee : la console n'affiche que les 6 dernieres lignes, donc les
+# tokens 0..N-2 et leurs XB= (indispensables pour diffe oracle/RTL) etaient perdus a chaque
+# run. Relancer l'exe a la main pour les recuperer coute une sim entiere -- et exige
+# $env:SIM_CYCLE_CAP, sans quoi le TB timeout au 1er token (defaut 40M cycles).
+$out | Out-File -Encoding utf8 tb_run_full.log
 $out | Select-Object -Last 6
+Write-Host "    (sortie complete : sim\tb_run_full.log)" -ForegroundColor DarkGray
 Write-Host ("==> wall-clock sim: {0:N2}s (exit=$rc)" -f $sw3.Elapsed.TotalSeconds) -ForegroundColor $(if ($rc -eq 0) {"Green"} else {"Yellow"})
