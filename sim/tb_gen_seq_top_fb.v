@@ -50,6 +50,15 @@ module tb_gen_seq_top_fb;
     wire [15:0]      token;
     wire             token_valid, done;
     wire             sim_fill_done;
+`ifdef SIM
+    // sondes debug gen_seq/node (exposees par gen_seq_top sous -DSIM) -> visibles VCD.
+    wire [5:0]    dbg_st;
+    wire [3:0]    dbg_phase;
+    wire [11:0]   dbg_idx;
+    wire [8:0]    dbg_node_state;
+    wire [31:0]   dbg_best_v;
+    wire [15:0]   dbg_best_i;
+`endif
 
     gen_seq_top #(.W(W), .D(CFG_D), .NL(CFG_NL), .NPOS(CFG_NPOS)) dut (
         .clk(clk), .rst_n(rst_n), .start(start), .gen_mode(gen_mode),
@@ -61,6 +70,10 @@ module tb_gen_seq_top_fb;
         .result(result), .result_sh(result_sh), .token(token),
         .token_valid(token_valid), .done(done),
         .sim_fill_done(sim_fill_done)
+`ifdef SIM
+        ,.dbg_st(dbg_st), .dbg_phase(dbg_phase), .dbg_idx(dbg_idx),
+         .dbg_node_state(dbg_node_state), .dbg_best_v(dbg_best_v), .dbg_best_i(dbg_best_i)
+`endif
     );
 
     // ---- entrees hex ----
@@ -72,10 +85,17 @@ module tb_gen_seq_top_fb;
     integer mismatch;
 
     // ---- watchdog (en C, rapide) : budget 40M cyc (fill ~1M + 17 tok ~1.5M) ----
+    // En mode WAVES : budget reduit a 3M cyc (assez pour 1 token en path SDRAM stream,
+    // evite un VCD enorme si la FSM boucle). Sans WAVES : 40M (sim complete).
     integer cyc = 0;
+`ifdef WAVES
+    localparam integer WATCHDOG = 3_000_000;
+`else
+    localparam integer WATCHDOG = 40_000_000;
+`endif
     always @(posedge clk) begin
         cyc <= cyc + 1;
-        if (cyc > 40_000_000) begin
+        if (cyc > WATCHDOG) begin
             $display("FAIL: watchdog timeout apres %0d cyc, got=%0d/%0d", cyc, got_count, NTOK);
             $finish;
         end
@@ -143,6 +163,28 @@ module tb_gen_seq_top_fb;
         // attend le remplissage du cache FFN BRAM (path silicium)
         wait (sim_fill_done === 1'b1);
         @(posedge clk);
+`ifdef WAVES
+        // Dump VCD : scope MINIMAL = signaux debug exposes (FSM state/phase/idx, argmax
+        // best_v/best_i, node_state) + horloge + sorties token. On evite $dumpvars(0, dut.u_seq)
+        // qui trace TOUS les sous-modules (vec_alu2, logits 512x8, ROMs cos/sin) -> VCD de
+        // ~1 GB. Les dbg_* suffisent pour visualiser le pipeline (phases PH_* defilent dans
+        // dbg_phase, FSM dans dbg_st, argmax dans dbg_best_v/i). VCD resultant : quelques MB.
+        $dumpfile("waves.vcd");
+        $dumpvars(0, dut.clk);
+        $dumpvars(0, dut.rst_n);
+        $dumpvars(0, dut.start);
+        $dumpvars(0, dut.gen_mode);
+        $dumpvars(0, dut.dbg_st);
+        $dumpvars(0, dut.dbg_phase);
+        $dumpvars(0, dut.dbg_idx);
+        $dumpvars(0, dut.dbg_best_v);
+        $dumpvars(0, dut.dbg_best_i);
+        $dumpvars(0, dut.dbg_node_state);
+        $dumpvars(0, dut.token);
+        $dumpvars(0, dut.token_valid);
+        $dumpvars(0, dut.done);
+        $dumpvars(0, dut.sim_fill_done);
+`endif
         gen_mode = 1'b1;
         start   = 1'b1;
         @(posedge clk);

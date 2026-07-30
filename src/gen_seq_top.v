@@ -53,6 +53,12 @@ module gen_seq_top #(
     output wire           sim_fill_done
 );
     `include "model_cfg.vh"
+
+    // NB : pas de $dumpvars ici. Le dump VCD (-DWAVES) est pilote par le TB
+    // (sim/tb_gen_seq_top_fb.v) qui ne trace qu'un scope minimal (dbg_* + token).
+    // Un $dumpvars(0) global place ici s'executait a #1, donc AVANT celui du TB :
+    // le simulateur ignorait alors le second ("VCD warning: $dumpvars ignored,
+    // previously called") et tracait tout le design -> waves.vcd de ~1 Go.
     // gen_seq shape : HID/LSTRIDE/OFF_*/LBASE/H/KH/HS passés via CFG_* (rework dim Phase 1).
     // D/NL/NPOS restent des parameter propagés à gen_seq (.D(D)) ; le PARENT (TB ou
     // gen_seq_silicon) doit surcharger .D(CFG_D)/.NL(CFG_NL)/.NPOS(CFG_NPOS) pour que les

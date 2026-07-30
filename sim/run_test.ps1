@@ -20,6 +20,7 @@ param(
     [switch]$FlashBoot,
     [switch]$SimDebug,
     [switch]$Hs16,
+    [switch]$Waves,               # -DWAVES : dump VCD -> waves.vcd (GTKWave)
     [string]$DumpFile = ""        # override du dump (ex: Strat A rand) ; sinon default -Hs16
 )
 
@@ -27,7 +28,7 @@ $ErrorActionPreference = "Continue"
 
 # ---- 1. env : oss-cad-suite (iverilog/vvp + DLLs) + Python 3.12 (cocotb) ----
 . C:\oss-cad-suite\environment.ps1
-$pyDir = "C:\Users\User\AppData\Local\Programs\Python\Python312"
+$pyDir = "C:\Users\pc\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0"
 $env:PATH = "$pyDir;$pyDir\Scripts;" + $env:PATH
 
 # ---- 2. cocotb 2.0 vars (vvp lance cocotb via le module VPI) ----
@@ -38,7 +39,9 @@ $env:TOPLEVEL_LANG        = "verilog"
 $env:PYTHONPATH           = $PWD.Path
 $env:COCOTB_LOG_LEVEL     = "INFO"
 
-$libdir = "$pyDir\Lib\site-packages\cocotb\libs"
+# Le Python Store (Microsoft Store) installe les packages user dans LocalCache\local-packages,
+# PAS dans Lib\site-packages (qui n'existe pas pour le Store). cocotbvpi_icarus.vpl y réside.
+$libdir = "$env:LOCALAPPDATA\Packages\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\LocalCache\local-packages\Python312\site-packages\cocotb\libs"
 
 # ---- 3. compile (cmd /c pour passer -o correctement ; PowerShell 5.1 wrap mal -o) ----
 # -s $Top force le top-level (sinon iverilog choisit Gowin_rPLL, non instancié,
@@ -51,7 +54,7 @@ if ($FlashBoot) {
 }
 $srcList += "../src/node_top.v ../src/wcache_ffn.v ../src/sdram.v ../src/mac18.v " +
             "../src/rmsnorm_op.v ../src/silu_op.v ../src/rope_op.v " +
-            "../src/softmax_op.v ../src/attention_head_op.v " +
+            "../src/softmax_op.v ../src/attention_head_op.v ../src/shared_lut.v " +
             "../src/vec_alu2.v ../src/async_fifo.v ../src/uart_bridge.v " +
             "../src/gen_seq.v ../src/gen_seq_top.v"
 # -DSIM : active en sim seulement (jamais en synthèse build_silicon). Permet à
@@ -71,6 +74,10 @@ if ($Hs16) {
         $env:DUMP = Join-Path $PWD.Path "..\host\gen_model_dump_hs16.json"
     }
     Write-Host "==> HS16_PROFILE ON (DUMP=$env:DUMP, HS=16 H=4 KH=2 score_sh=1)" -ForegroundColor Magenta
+}
+if ($Waves) {
+    $defs += " -DWAVES"
+    Write-Host "==> WAVES ON (dump VCD -> waves.vcd pour GTKWave)" -ForegroundColor Magenta
 }
 Write-Host "==> iverilog compile ($Top -> $Top.vvp)" -ForegroundColor Cyan
 cmd /c "iverilog -o $Top.vvp -s $Top -g2012 $defs -I../src $srcList 2>&1"

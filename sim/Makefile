@@ -22,7 +22,8 @@ $(HEX_FILES): %: $(LUT)/%
 hex: $(HEX_FILES)
 
 # node_top.v = module `top` ss-link+KV (path silicium, sim-compatible via mocks).
-# L'ancien src/top.v UART-direct n'a PAS les ports lk_rx/tx+kv_* que gen_seq_top.v
+# L'ancien monolithe UART-direct (src/legacy/top_gowin_monolith.v, ex-src/top.v,
+# desormais hors de tout flow) n'a PAS les ports lk_rx/tx+kv_* que gen_seq_top.v
 # connecte -> sim cassée depuis l'étape 1 KV SDRAM. On pointe sur node_top.v
 # (mêmes ports ss-link+KV), cache controller inactif sans FLASH_BOOT (reads FFN ->
 # fallback SDRAM = path sim historique, bit-exact vs SDRAM_PRELOAD). Voir mémoire
@@ -38,6 +39,7 @@ VERILOG_SOURCES += $(RTL)/silu_op.v
 VERILOG_SOURCES += $(RTL)/rope_op.v
 VERILOG_SOURCES += $(RTL)/softmax_op.v
 VERILOG_SOURCES += $(RTL)/attention_head_op.v
+VERILOG_SOURCES += $(RTL)/shared_lut.v
 VERILOG_SOURCES += $(RTL)/sdram.v
 VERILOG_SOURCES += $(abspath ../src/async_fifo.v)
 VERILOG_SOURCES += $(abspath ../src/uart_bridge.v)
@@ -54,6 +56,12 @@ COMPILE_ARGS += -DLINK_SS
 # préchargent leurs propres poids par VPI qui écrase ces zones au runtime.
 COMPILE_ARGS += -DSDRAM_PRELOAD
 COMPILE_ARGS += -I$(RTL)
+
+# WAVES=1 : active le dump VCD dans gen_seq_top.v (ifdef WAVES) -> waves.vcd pour
+# GTKWave. Inactif sinon (pas de overhead ni de fichier généré).
+ifeq ($(WAVES),1)
+    COMPILE_ARGS += -DWAVES
+endif
 
 TOPLEVEL := gen_seq_top
 MODULE   ?= test_gen_A
