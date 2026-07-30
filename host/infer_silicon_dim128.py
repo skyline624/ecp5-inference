@@ -195,7 +195,13 @@ def main():
     print(f"\nMatch silicium vs sim    : {ms}/{n}")
     print(f"Match silicium vs oracle : {mo}/{n}")
     # Verdict (sur les 3 mismatches p14-16, ou match global)
-    if ms == n and n == len(SIM_TOKENS_L):
+    # Cas nominal d'abord : les TROIS concordent. Sans ce test, le script annoncait
+    # "RTL right (oracle a un gap)" alors que l'oracle etait parfaitement d'accord —
+    # verdict trompeur, qui a contribue a faire passer le bug LBASE/tok_emb pour un
+    # "drift d'oracle" pendant des mois.
+    if ms == n and mo == n and n == len(ORACLE_L):
+        print(f"VERDICT: silicium == sim == oracle sur {n}/{n} tokens -> BIT-EXACT")
+    elif ms == n and n == len(SIM_TOKENS_L):
         print("VERDICT: silicium == sim -> RTL right (oracle a un gap, comme tok9)")
     elif mo == n and n == len(ORACLE_L):
         print("VERDICT: silicium == oracle -> bug RTL (sim/RTL diverge du modèle)")

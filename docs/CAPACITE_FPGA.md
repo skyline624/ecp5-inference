@@ -26,7 +26,7 @@ de dimensionnement pour tinyllamas (`dim=512`).
 | 64 (stories260K) | défaut | 5 (cache-all) | 28 525 (65 %) | 99 (92 %) | 18 (25 %) | 37,6 MHz | PASS | ~1 Mo | 17/17 (ref) | ✅ référence perf 14 tok/s |
 | 64 (stream) | NC0_PROFILE | 0 | TBD | TBD | TBD | TBD | TBD | ~1 Mo | 17/17 (Phase 5) | ✅ base stream |
 | 128 | DIM128 | 0 | 38 034 (87 %) | 10 (9 %) | 15 (21 %) | 33,43 MHz | 28,38 MHz PASS | ~5,3 Mo | 17/17 (sim+silicium) | ✅ **max single-FPGA validé silicium** |
-| 256 | DIM256 | 0 | ~~49 095 (112 %)~~ → **26 239 (59 %)** | 22 (20 %) | 15 (20 %) | ~~nextpnr fail~~ → **43,91 MHz** | **27,62 MHz PASS** | **3,64 Mo** (vocab=512) | ~~5/17 (drift oracle)~~ → **17/17 bit-exact** (fix layout LBASE) | ✅ **tourne sur silicium, bit-exact depuis le 30/07** |
+| 256 | DIM256 | 0 | ~~49 095 (112 %)~~ → **26 239 (59 %)** | 22 (20 %) | 15 (20 %) | ~~nextpnr fail~~ → **43,91 MHz** | **27,62 MHz PASS** | **3,64 Mo** (vocab=512) | ~~5/17 (drift oracle)~~ → **17/17 bit-exact sim + SILICIUM** (fix layout LBASE) | ✅ **palier pleinement qualifie (30/07)** |
 | 512 | DIM512 | 0 | ~~82 851 (189 %)~~ → **39 116 (89,2 %)** | 23 (21 %) | 19 (26 %) | à mesurer (P&R non lancé) | — | **14,16 Mo** (vocab=512) | non testé | ⚠ **LUT tient désormais** — bloqué par la SDRAM seule |
 
 > Mesures Phase 7d (build 24/07, branche `hs-param-rework-dotfix`, NODE_ONLY+FLASH_BOOT
@@ -99,8 +99,16 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > fidèlement une SDRAM mal remplie. Le fautif était le plan mémoire, partagé RTL + host.
 >
 > Correctif (`CFG_LBASE` dérivé de `CFG_VOCAB*CFG_D`, plancher `0x010000` pour ne rien
-> changer à dim=64/128) → **dim=256 est bit-exact 17/17 en sim**, dim=64 et dim=128
-> inchangés (17/17 chacun). dim=512 corrigé du même coup.
+> changer à dim=64/128) → **dim=256 est bit-exact 17/17 en sim ET SUR SILICIUM** :
+>
+> ```
+> silicium / sim / oracle : [46,46,46,463,463,463,463,463,463,463,46,46,46,46,463,463,46]
+> Match silicium vs oracle : 17/17
+> ```
+>
+> dim=64 et dim=128 inchangés (17/17 chacun). dim=512 corrigé du même coup.
+> **dim=256 est donc un palier pleinement qualifié : il route (59 % du die), il tient en
+> mémoire (3,64 Mo), il s'exécute sur la carte, et il est bit-exact.**
 >
 > ⚠ **Débit** : 607 M cycles pour 17 tokens à dim=256, contre 28,9 M à dim=64 — un **facteur
 > 21**. Le datapath restant sériel (1 élément/cycle), le coût croît en `D²` alors que la
