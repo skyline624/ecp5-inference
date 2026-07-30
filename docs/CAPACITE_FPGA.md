@@ -26,8 +26,8 @@ de dimensionnement pour tinyllamas (`dim=512`).
 | 64 (stories260K) | défaut | 5 (cache-all) | 28 525 (65 %) | 99 (92 %) | 18 (25 %) | 37,6 MHz | PASS | ~1 Mo | 17/17 (ref) | ✅ référence perf 14 tok/s |
 | 64 (stream) | NC0_PROFILE | 0 | TBD | TBD | TBD | TBD | TBD | ~1 Mo | 17/17 (Phase 5) | ✅ base stream |
 | 128 | DIM128 | 0 | 38 034 (87 %) | 10 (9 %) | 15 (21 %) | 33,43 MHz | 28,38 MHz PASS | ~5,3 Mo | 17/17 (sim+silicium) | ✅ **max single-FPGA validé silicium** |
-| 256 | DIM256 | 0 | ~~49 095 (112 %)~~ → **40 099 (91,5 %)** | 20 (18 %) | 15 (21 %) | ~~nextpnr fail~~ → **36,67 MHz** | **25,12 MHz PASS** | ~13 Mo | non validé (oracle drift) | ⚠ **route depuis le 30/07** — mur SDRAM restant |
-| 512 | DIM512 | 0 | 82 851 (**189 %**) | 11 (10 %) | 15 (21 %) | n/a (nextpnr fail) | n/a | ~37 Mo | sim: `$readmem` fail (37 Mo > 8 Mo SDRAM) | ❌ **cluster requis** (à re-mesurer, cf. note) |
+| 256 | DIM256 | 0 | ~~49 095 (112 %)~~ → **26 239 (59 %)** | 22 (20 %) | 15 (20 %) | ~~nextpnr fail~~ → **43,91 MHz** | **27,62 MHz PASS** | **3,64 Mo** (vocab=512) | **silicium == sim** (5/17 vs oracle : drift d'oracle préexistant) | ✅ **tourne sur silicium depuis le 30/07** |
+| 512 | DIM512 | 0 | ~~82 851 (189 %)~~ → **39 116 (89,2 %)** | 23 (21 %) | 19 (26 %) | à mesurer (P&R non lancé) | — | **14,16 Mo** (vocab=512) | non testé | ⚠ **LUT tient désormais** — bloqué par la SDRAM seule |
 
 > Mesures Phase 7d (build 24/07, branche `hs-param-rework-dotfix`, NODE_ONLY+FLASH_BOOT
 > +CLUSTER_NODE, NC=0 stream). `dim=64 NC=5` = ref stories260K (commit `4f73fcd`).
@@ -54,9 +54,36 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > Le premier palier bloquant en mémoire est **dim=512**. Après le rework LUT du 30/07,
 > dim=256 est donc atteignable sur une seule i9 (die 65 %, poids 3,64 Mo).
 >
-> Restrictions restantes : (a) le bit-exact dim=256 n'est pas encore valide sur silicium ;
-> (b) **dim=512 n'a pas été re-mesuré** en LUT après le rework — les 189 % sont un chiffre
-> d'avant, à refaire ; son mur SDRAM (14,16 Mo), lui, est réel.
+> **dim=512 re-mesuré le 30/07** : **39 116 LUT+carry = 89,2 % du die** (`-noflatten`),
+> contre 189 % avant le rework — soit **−52,8 %**. Comme le flow de build optimise mieux que
+> `-noflatten` (à dim=256 : 65,1 % en synthèse → **59 %** après P&R), dim=512 devrait
+> atterrir autour de **80 %** en build réel. **La logique de dim=512 rentre donc désormais
+> sur un seul ECP5-45F**, alors qu'elle en demandait presque deux.
+>
+> **Le seul obstacle restant à dim=512 est la taille du modèle** : 14,16 Mo de poids contre
+> 8 Mo de SDRAM — et 8 Mo de flash W25Q64, donc le weight-streaming depuis la flash ne le
+> lève pas non plus. Baisser le vocabulaire ne sert à rien ici (`tok_emb` = 0,25 Mo, soit
+> 1,8 % du total ; 81 % du poids est dans le FFN, en `9·D²` par couche). Ce qui ferait tenir :
+>
+> | levier | total | tient dans 8 Mo ? | coût |
+> |---|---|---|---|
+> | `NL=2` au lieu de 5 | 5,81 Mo | oui | simple paramètre `CFG_NL`, mais réseau à 2 couches |
+> | `HID=1·D` au lieu de 3·D | 6,66 Mo | oui | **rework FSM** (`NCHUNK_F=3` hardcodé) |
+> | `NL=3` | 8,60 Mo | non (de peu) | — |
+> | vocab 512 → 32 | 13,93 Mo | non | inutile |
+>
+> **dim=256 exécuté sur silicium le 30/07** (premier test réel de ce palier). Méthode : pas
+> d'image flash (`gen_flash_model.py` est verrouillé dim64) — le modèle synthétique est
+> chargé **par UART** via `infer_silicon_dim128.py --dump gen_model_dump_dim256.json`, qui
+> est dim-générique (offsets dérivés de `cfg`). 57 régions, 3,82 Mo en 60 s, puis `SH` + `GO`.
+>
+> Résultat : **silicium == sim Verilator** (mêmes tokens, `tok[16]=426`, 5/17 vs oracle pour
+> les deux). C'est le schéma « RTL right » : quand silicium et sim concordent et divergent
+> ensemble de l'oracle, c'est l'**oracle Python** qui a un gap, pas le RTL. Ce drift est
+> **antérieur au rework** (ce document notait déjà « 5/17 sim (oracle drift) » à dim=256).
+>
+> Autrement dit : **le datapath dim=256 s'exécute correctement sur la carte** ; ce qui reste
+> à corriger est l'oracle `prove_gen_node.forward_node` à ce palier, pas le RTL.
 
 ## Lecture : le mur se déplace BRAM → LUT
 

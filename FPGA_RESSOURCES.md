@@ -348,13 +348,27 @@ octets simultanément pour alimenter l'attention — besoin parallèle réel, co
 de la mémoire à dim256. Le coût est ici justifié.
 
 ### Bilan cumulé
-| | origine | final | gain |
+| profil | origine | final | gain |
 |---|---|---|---|
-| dim256 (`-noflatten`, LUT4+carry) | 55 571 (**126,7 %**) | **28 535 (65,1 %)** | **−48,7 %** |
-| dim64 (P&R silicium, Total LUT4) | 26 874 (61 %) | **20 325 (46 %)** | **−24,4 %** |
+| dim64 (P&R, Total LUT4) | 26 874 (61 %) | **20 325 (46 %)** | −24,4 % |
+| dim256 (`-noflatten`) | 55 571 (**126,7 %**) | **28 535 (65,1 %)** | −48,7 % |
+| **dim256 (P&R réel)** | 112 % (`nextpnr fail`) | **26 239 LUT4 — 59 %**, 43,91 MHz PASS | — |
+| **dim512** (`-noflatten`) | 82 851 (**189 %**) | **39 116 (89,2 %)** | **−52,8 %** |
 
-dim256 est passé de « déborde le die, cluster requis » à **65 % d'occupation**. Le bit-exact
-a été vérifié à chaque étape : sim sur deux paliers, et trois validations silicium.
+Deux paliers déclarés hors d'atteinte le sont redevenus :
+- **dim256 route avec une marge confortable** (59 % du die après P&R, BRAM 20 %, DSP 20 %) et
+  **tient en mémoire** (3,64 Mo pour 8 Mo). Il est atteignable sur une seule i9.
+- **dim512 rentre désormais en logique** (89,2 % en synthèse, ~80 % attendu après P&R, contre
+  189 % avant). Il reste bloqué par la **seule** taille du modèle : 14,16 Mo contre 8 Mo de
+  SDRAM *et* 8 Mo de flash — donc le weight-streaming ne le lève pas. Leviers : `NL=2`
+  (5,81 Mo, simple paramètre) ou `HID=1·D` (6,66 Mo, mais `NCHUNK_F=3` est hardcodé dans la
+  FSM). Baisser le vocabulaire est inutile à ce palier (0,25 Mo, soit 1,8 % du total).
+
+Le bit-exact a été vérifié à chaque étape : sim sur deux paliers et trois validations silicium.
+
+**Prochain gisement, si l'on vise dim512** : la hiérarchie s'est inversée. À dim512 c'est
+désormais **`gen_seq` qui domine** (15 826 LUT contre 10 975 pour node_top), via son `vfile`
+(`NSLOTS*D` = 8×512 octets) et `pkt`.
 
 ### Prochain gisement (non traité)
 À dim256, `top`/node_top pèse **19 702 LUT sur 40 197** (~49 % du design) et conserve le

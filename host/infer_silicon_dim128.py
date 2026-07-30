@@ -172,18 +172,25 @@ def main():
         tokens.append(tok)
     ser.close()
 
+    # Oracle : priorite au node_tokens du dump (calcule par gen_synthetic_dim.py pour CE
+    # palier) plutot qu'aux constantes ci-dessus, figees sur dim128. Rend le script
+    # utilisable tel quel a n'importe quel dim -- c'est deja le cas du reste du code, qui
+    # derive tous ses offsets de cfg (D/HID/NL/H/KH/HS/VOCAB).
+    oracle = m.get('node_tokens') or ORACLE
+    sim_ref = SIM_TOKENS if oracle is ORACLE else oracle
     print(f"\nSilicium tokens : {tokens}")
-    print(f"RTL (sim)      : {SIM_TOKENS}")
-    print(f"Oracle         : {ORACLE}")
-    n = min(len(tokens), len(SIM_TOKENS), len(ORACLE))
-    ms = sum(1 for i in range(n) if tokens[i] == SIM_TOKENS[i])
-    mo = sum(1 for i in range(n) if tokens[i] == ORACLE[i])
+    print(f"RTL (sim)      : {sim_ref}")
+    print(f"Oracle         : {oracle}")
+    SIM_TOKENS_L, ORACLE_L = sim_ref, oracle
+    n = min(len(tokens), len(SIM_TOKENS_L), len(ORACLE_L))
+    ms = sum(1 for i in range(n) if tokens[i] == SIM_TOKENS_L[i])
+    mo = sum(1 for i in range(n) if tokens[i] == ORACLE_L[i])
     print(f"\nMatch silicium vs sim    : {ms}/{n}")
     print(f"Match silicium vs oracle : {mo}/{n}")
     # Verdict (sur les 3 mismatches p14-16, ou match global)
-    if ms == n and n == len(SIM_TOKENS):
+    if ms == n and n == len(SIM_TOKENS_L):
         print("VERDICT: silicium == sim -> RTL right (oracle a un gap, comme tok9)")
-    elif mo == n and n == len(ORACLE):
+    elif mo == n and n == len(ORACLE_L):
         print("VERDICT: silicium == oracle -> bug RTL (sim/RTL diverge du modèle)")
     else:
         print("VERDICT: silicium diffère de sim ET oracle -> investiguer (race timing ?)")
