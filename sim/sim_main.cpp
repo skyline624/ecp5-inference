@@ -103,13 +103,17 @@ int main(int argc, char** argv) {
             int c1 = (int)(int8_t)(top->dbg_csh1 & 0xFF);
             int sr = (int)(int8_t)(top->dbg_sref_lm & 0xFF);
             int bv1 = (int)top->dbg_bv1; int bi1 = (int)(top->dbg_bi1 & 0xFFFF);
+            // Adresse SDRAM du DERNIER matmul FQ = dernier chunk du lm_head. A dim256 le
+            // chunk 1 doit valoir 0x010000 (A_EMB + 1*D*D). Toute autre valeur explique
+            // directement des logits "valides mais faux" sur ce chunk.
+            unsigned fma = (unsigned)(top->dbg_fm_addr & 0x7FFFFF);
             if (tok != (int)expect[got]) {
-                printf("MISMATCH tok[%d]=%d expect=%d  (rtl best_i=%d best_v=%d) sh=%d csh=[%d,%d] sref=%d chunk1_max=%d@%d XB=%s\n",
-                       got, tok, (int)expect[got], bi, bv, sh, c0, c1, sr, bv1, bi1, hexbuf);
+                printf("MISMATCH tok[%d]=%d expect=%d  (rtl best_i=%d best_v=%d) sh=%d csh=[%d,%d] sref=%d chunk1_max=%d@%d fm_addr=0x%06x XB=%s\n",
+                       got, tok, (int)expect[got], bi, bv, sh, c0, c1, sr, bv1, bi1, fma, hexbuf);
                 mismatch++;
             } else {
-                printf("tok[%d]=%d OK  (best_i=%d best_v=%d) sh=%d csh=[%d,%d] sref=%d chunk1_max=%d@%d XB=%s\n",
-                       got, tok, bi, bv, sh, c0, c1, sr, bv1, bi1, hexbuf);
+                printf("tok[%d]=%d OK  (best_i=%d best_v=%d) sh=%d csh=[%d,%d] sref=%d chunk1_max=%d@%d fm_addr=0x%06x XB=%s\n",
+                       got, tok, bi, bv, sh, c0, c1, sr, bv1, bi1, fma, hexbuf);
             }
             got++;
         }

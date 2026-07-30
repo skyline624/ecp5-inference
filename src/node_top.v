@@ -143,6 +143,10 @@ module top #(
 `endif
 `ifdef SIM
     ,output wire [8:0] dbg_node_state       // debug SIM-only : node FSM state (localise hang)
+    // Adresse SDRAM de depart du dernier matmul FQ/FM (capturee a S_FM_A2, quand les 3
+    // octets d'adresse sont recus). A dim256 le chunk 1 du lm_head est a 0x010000 : la
+    // PREMIERE adresse tok_emb dont le champ sd_addr[20:16] est non nul.
+    ,output wire [22:0] dbg_fm_addr
 `endif
 );
 
@@ -172,6 +176,9 @@ module top #(
 
     // ---- SDRAM controller (NESTang) ----
     reg  [22:0] sd_addr;
+`ifdef SIM
+    reg  [22:0] dbg_fm_addr_r;      // sonde : adresse de depart du matmul FQ/FM
+`endif
     reg         sd_rd, sd_wr;
     reg  [7:0]  sd_din;
     wire [7:0]  sd_dout;
@@ -1283,6 +1290,7 @@ module top #(
     reg [8:0] state;            // 9-bit (256+ pour GG v5 full)
 `ifdef SIM
     assign dbg_node_state = state;   // debug SIM-only : expose node FSM state
+    assign dbg_fm_addr    = dbg_fm_addr_r;
 `endif
     reg [8:0] ret_state;
     reg [8:0] next_state;
@@ -1838,6 +1846,9 @@ module top #(
                 S_FM_A1: if (rx_pending) begin sd_addr[15:8]  <= rx_byte;       state <= S_FM_A2; end
                 S_FM_A2: if (rx_pending) begin
                     sd_addr[22:16] <= rx_byte[6:0];
+`ifdef SIM
+                    dbg_fm_addr_r  <= {rx_byte[6:0], sd_addr[15:0]};   // sonde adresse complete
+`endif
                     fm_row    <= 7'd0;
                     fetch_idx <= 7'd0;
                     bulk_delay<= 4'd0;
