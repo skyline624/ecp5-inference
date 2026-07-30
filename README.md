@@ -41,7 +41,7 @@ Plan complet : `docs/PLAN_ECP5_BRINGUP.md` (cluster), `docs/PLAN_GEN_SEQUENCER.m
 
 ## Pourquoi
 
-La lignée monolithique (`src/top.v` + FSM `GG`) ne route pas sur GW2AR-18
+La lignée monolithique (`src/legacy/top_gowin_monolith.v` + FSM `GG`) ne route pas sur GW2AR-18
 (congestion-bound, 372–789 nets non routés). La branche cluster a bâti une
 lignée tensor-parallel portable prouvée en sim (`gen_seq` 17/17 bit-exact).
 Verdict : valider sur un cluster de FPGA ECP5. Ce dossier porte cette lignée
@@ -57,9 +57,10 @@ Verdict : valider sur un cluster de FPGA ECP5. Ce dossier porte cette lignée
 | 2b | Port SDRAM (8 Mo R/W byte-exact) | ✅ self-test 1024 mots × 2 patterns passe sur i9 (DQM hardwired → accès 32-bit word-aligned) |
 | 3 | Port du nœud (matmul bit-exact) — DSP mac18 | ✅ matmul W@x (int8×int8→int32, 8 lignes) bit-exact vs réf Python sur i9 — mac18 RTL → MULT18X18D (sim + silicium) |
 | 4 | Lien 2-cartes PMOD (ss_link, skew = inconnue n°1) | à faire (pinout PMOD à assigner — `Colorlight-FPGA-Projects/src/amaranth_boards/colorlight_i9_r7_2.py` lignes 85-89, pmod 2/3 sur P3 recommandés, éviter pmod 0 = L2/LED) |
-| 5 | Tensor-parallel NN=2 | à faire (sim vert NN=2 et NN=4 ; silicium non testé) |
+| 5 | Tensor-parallel NN=2 | à faire — `CFG_NN=1` est encore un placeholder (`src/model_cfg.vh`) et `ring_cluster.v` est un banc de test all-gather **non branché** au datapath. Plan de rework détaillé et ordonné : **`docs/CLUSTER_DIM_SHARDING.md`** (étape 1 = sharder les poids côté host + oracle sharded, avant tout câblage inter-FPGA) |
 | 6 | Génération zéro-PC (boot flash SPI) | ✅ boot flash W25Q64→SDRAM validé silicium (modèle auto-chargé au power-up, USRMCLK pour SCK, block protection off, RR préalable) — voir `docs/FLASH_BOOT.md` |
-| 6' | Génération autonome mono-carte (UART-loading) | ✅ `board/gen_seq_silicon.v` — **9 tokens bit-exact** `[403,407,261,378,432,383,286,261,376]` sur silicium (divergence @9 acceptée, softmax simplifié). Boot flash + prefill (prompt→génération) + KV-cache SDRAM validés. |
+| 6' | Génération autonome mono-carte (UART-loading) | ✅ `board/gen_seq_silicon.v` — **9 tokens bit-exact** `[403,407,261,378,432,383,286,261,376]` sur silicium (divergence @9 acceptée, softmax simplifié). Boot flash + prefill (prompt→génération) + KV-cache SDRAM validés. **14 tok/s** en decode. |
+| 6'' | Profil **dim128** paramétrable | ✅ **17/17 bit-exact** sur silicium (`build_silicon.ps1 -Dim128` + `host\infer_silicon_dim128.py`), oracle `[385,385,385,79,…,79,60]`. Le RTL est dim-paramétrable (`-Dim128/256/512`) ; dim≥256 bloqué par le mur LUT, cf. `docs/CAPACITE_FPGA.md`. |
 
 ### Validation silicium étendue (mono-carte, branche `prove-gen-node`)
 
@@ -74,10 +75,15 @@ Au-delà du bring-up, la gate 6' a été durcie et optimisée sur silicium
 | Perf 2a — dot | FQ pipeliné mac18 (256→68 cyc/ligne) | decode 8.53→10.96 tok/s (×1.61 cumulé) |
 | Perf 3 — wcache | cache FFN BRAM 184 KiB (90 DP16KD) | decode 10.96→14.02 tok/s (×2.06 cumulé) |
 | KV-cache SDRAM | kmem/vmem BRAM→SDRAM externe (libère 6 DP16KD, `kv_cdc` toggle-sync CDC clk↔clk_sys) | 9 bit-exact préservé, TMAX>>32 possible |
+| Tables → BRAM | exp/inv/rsqrt/silu (4×256×16 Q15) de LUT-RAM → DP16KD (`src/shared_lut.v`) | **−1 007 LUT4**, +3 DP16KD, Fmax inchangée, 17/17 tokens identiques |
 
-Build silicium : `.\build\build_silicon.ps1` (`-D NODE_ONLY,FLASH_BOOT,CLUSTER_NODE`),
-DP16KD 91 %, timing PASS (clk 30.6 / clk_sys 35.5 MHz). Flash :
-`openFPGALoader -b colorlight-i9 --skip-reset build\gen_seq_silicon.bit`.
+Build silicium : `.\build\build_silicon.ps1` (`-D NODE_ONLY,FLASH_BOOT,CLUSTER_NODE`).
+Ressources dim64 mesurées : **LUT4 26 874/43 848 (61 %)**, **BRAM 102/108 (94 %)**,
+**DSP 17/72 (23 %)**, DFF 9 860 (22 %), **Fmax 41,46 MHz** (PASS @ 31,25). Le mur est
+la BRAM, et il est dû au cache FFN (90 des 102 blocs) — ventilation par module et
+leviers de scale dans **`FPGA_RESSOURCES.md`**. Flash :
+`openFPGALoader -b colorlight-i9 --skip-reset build\gen_seq_silicon.bit`
+(procédure complète, adresses flash et signatures d'échec : `docs/CAPTURES_SILICIUM.md`).
 
 > **Note** : la Gate 6' (`gen_seq_silicon.v`) est une dérivation parallèle au
 > chemin cluster — la même FSM `gen_seq` (NN=1 figé) orchestrée par un wrapper
@@ -110,7 +116,11 @@ DP16KD 91 %, timing PASS (clk 30.6 / clk_sys 35.5 MHz). Flash :
    d'abord le Python Store + désactive les alias d'app `python.exe`/`python3.exe`
    dans Paramètres → Alias d'exécution d'application), puis `pip install cocotb numpy`
    dans le nouveau Python. Depuis Git Bash, préfixer le PATH :
-   `export PATH="/c/oss-cad-suite/bin:/c/oss-cad-suite/lib:/c/Users/User/AppData/Local/Programs/Python/Python312/Scripts:/c/Users/User/AppData/Local/Programs/Python/Python312:$PATH"`
+   `export PY=/c/Users/$USERNAME/AppData/Local/Programs/Python/Python312 ;
+   export PATH="/c/oss-cad-suite/bin:/c/oss-cad-suite/lib:$PY/Scripts:$PY:$PATH"`
+   (⚠ ne **pas** coder en dur un nom d'utilisateur : `sim/run_test.ps1` et
+   `sim/run_verilator_fb.ps1` l'ont fait et cassaient au changement de machine ;
+   ils détectent désormais Python dynamiquement, `$env:PYTHON` forçant le choix)
    et `export PYTHONPATH="$(pwd)"` (depuis `sim/`) pour que les modules de test
    soient trouvables.
 3. **make** (oss-cad-suite ne le fournit pas) : MSYS2 `pacman -S make`
@@ -148,14 +158,26 @@ Sous Git-Bash, parité avec `-Extra` :
 ## Layout
 
 ```
-src/      RTL adapté ECP5 (ops copiées + lignée cluster + mac18.v/ecp5_ecp5pll.v à écrire)
+src/      RTL ECP5 : ops portées, lignée cluster (tp_*/ring_*/ss_link), séquenceur
+          (gen_seq/gen_seq_top/node_top), mac18.v + ecp5_ecp5pll.v, shared_lut.v,
+          model_cfg.vh (source unique des profils dim)
+src/legacy/  code historique NON compilé (monolithe Gowin porté) — cf. son README.md
 board/    blink.v, blink.lpf, colorlight_i9.lpf (pinout complet), colorlight_i9_v7.2.md (source wuxx)
           + gen_seq_silicon.{v,lpf} (wrapper silicium Gate 6'), tb_wrap.v
-build/    synth.ys, build.ps1, build.sh, scaffold.ps1, install_toolchain.ps1
-sim/      Makefile natif cocotb+iverilog (sans Docker), modèles + testbenches + test_*.py
+build/    synth.ys, build.ps1, build_silicon.ps1, synth_stat.ps1 (LUT/BRAM par module),
+          build.sh, scaffold.ps1, install_toolchain.ps1
+sim/      Makefile cocotb+iverilog + flow Verilator rapide (run_verilator_fb.ps1),
+          modèles SDRAM/flash, testbenches, test_*.py — cf. VERILATOR_FAST_SIM.md
+host/     oracle Python bit-exact (prove_gen_node.py, transformer_ops.py, v4_quant.py),
+          générateurs d'images flash/preload, scripts d'inférence et de diagnostic
 scripts/  gen_{exp,inv,rsqrt,silu,freq_cis}_lut.py + regen_luts.py (source des .hex)
 lut/      6 .hex (rsqrt/silu/exp/inv/freq_cis_cos/freq_cis_sin) + README.md
-docs/     PLAN_ECP5_BRINGUP, PLAN_GEN_SEQUENCER, REFACTOR_UNIFIED_NODE, SESSION_PROMPTS
+web/, server/   FPGA Packet Tracer (visualisation du pipeline et des mémoires)
+tools/    outils tiers clonés localement (nextpnr-viewer) — non versionné
+docs/     PLAN_ECP5_BRINGUP, PLAN_GEN_SEQUENCER, REFACTOR_UNIFIED_NODE, SESSION_PROMPTS,
+          FLASH_BOOT, CAPACITE_FPGA, CLUSTER_DIM_SHARDING, CAPTURES_SILICIUM,
+          MODELE_LLM_SUR_FPGA
+FPGA_RESSOURCES.md   ventilation LUT/BRAM/DSP par module + leviers de scale
 ```
 
 ## Portage des primitives Gowin → ECP5 (étape 3, le point dur)
@@ -164,12 +186,17 @@ docs/     PLAN_ECP5_BRINGUP, PLAN_GEN_SEQUENCER, REFACTOR_UNIFIED_NODE, SESSION_
 |---|---|---|
 | `Gowin_rPLL` (rPLL) | `EHXPLLL` | `src/ecp5_ecp5pll.v` (✅ Gate 2a verte — lock + clk_sys sur silicium) |
 | `MULTALU18X18` (mac18) | RTL pur → `MULT18X18D` (inféré) | `src/mac18.v` (✅ sim bit-exact vs Gowin sur 4000 échantillons ; yosys infère MULT18X18D) |
-| `(* syn_ramstyle="block_ram" *)` | `(* ram_style="block" *)` | top.v:240,250,258,267,274,282 ; gen_seq.v:220-221 |
-| `(* syn_ramstyle="registers" *)` | `(* ram_style="registers" *)` | top.v:866 |
+| `(* syn_ramstyle="block_ram" *)` | `(* ram_style="block" *)` | `legacy/top_gowin_monolith.v`:240,250,258,267,274,282 ; gen_seq.v:220-221 |
+| `(* syn_ramstyle="registers" *)` | `(* ram_style="registers" *)` | `legacy/top_gowin_monolith.v`:866 |
 | `.cst` (Gowin) | `.lpf` (Lattice) | `board/colorlight_i9.lpf` |
 
 `mac18` doit préserver exactement les ports `(clk, rst, ce, load, a[17:0], b[17:0], result[53:0])`
-pour que `top.v` soit inchangé. Bug du drain : forcer `a=b=0` quand `ce=0`.
+pour que le monolithe Gowin soit inchangé. Bug du drain : forcer `a=b=0` quand `ce=0`.
+
+> Le monolithe porté vit désormais dans **`src/legacy/top_gowin_monolith.v`**
+> (anciennement `src/top.v`) : il n'est compilé par aucun flow et entrait en
+> collision de nom `module top` avec `src/node_top.v`, qui est le vrai nœud du
+> build. Voir `src/legacy/README.md`.
 
 ## Piège `$readmemh`
 

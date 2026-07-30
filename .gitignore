@@ -81,3 +81,20 @@ sim/sim_*.txt
 sim/oracle_*.txt
 sim/vobj_vlog.txt
 sim/vtest.txt
+
+# ---- dumps de formes d'ondes (regenerables : run_tb_fb.ps1 / run_test.ps1 -Waves) ----
+# Volumineux (un run 1-token complet = ~1 Go de VCD). waves.gtkw = selection de
+# signaux GTKWave, artefact local. `*.vcd` n'etait ignore que sous server/vcd/.
+*.vcd
+*.fst
+*.gtkw
+
+# ---- backups d'artefacts sim regenerables (gen_tb_hex.py) ----
+sim/*.bak*
+sim/compile_err.txt
+
+# ---- outils tiers clones en local (NE PAS commiter : ~877 Mo avec node_modules) ----
+# nextpnr-viewer (https://github.com/edacation/nextpnr-viewer) : visualiseur du
+# place-and-route ECP5, alimente par build.ps1 --write <top>.pnr.json.
+# A cloner soi-meme : git clone https://github.com/edacation/nextpnr-viewer tools/nextpnr-viewer
+tools/

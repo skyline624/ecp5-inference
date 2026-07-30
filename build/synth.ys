@@ -11,6 +11,7 @@ if {[info exists env(TOP)]} { set TOP $env(TOP) } else { set TOP "blink" }
 if {[info exists env(SRC)]} { set SRC $env(SRC) } else { set SRC "../board/blink.v" }
 
 read_verilog $SRC
-# Belt-and-suspenders: strip any leftover Gowin attributes when porting src/top.v.
+# Belt-and-suspenders: strip any leftover Gowin attributes when porting the
+# monolith (src/legacy/top_gowin_monolith.v, ex-src/top.v).
 # attrmap -remove syn_ramstyle
 synth_ecp5 -top $TOP -json ${TOP}.json
