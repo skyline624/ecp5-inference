@@ -50,12 +50,8 @@ module softmax_op #(
     // absorbe la latence via un etat _WAIT supplementaire (cf. silu_op.v / rmsnorm_op.v).
     wire [15:0] exp_q;
     wire [15:0] inv_q;
-    shared_lut #(.HEX("exp_lut.hex")) u_exp_lut (
-        .clk(clk), .addr(exp_idx), .q(exp_q)
-    );
-    shared_lut #(.HEX("inv_lut.hex")) u_inv_lut (
-        .clk(clk), .addr(inv_lut_idx), .q(inv_q)
-    );
+    // Instances shared_lut deplacees APRES les declarations de exp_idx / inv_lut_idx
+    // (icarus strict sur declaration-avant-usage des wires de port ; Yosys permissif).
 
     // Storage exp_val (K_MAX entrees x 16-bit)
     reg [15:0] exp_val [0:K_MAX-1];
@@ -124,6 +120,14 @@ module softmax_op #(
             sum_norm = {8'd0, sum_acc} >> (-shift_inv);
     end
     wire [7:0] inv_lut_idx = sum_norm[7:0];
+
+    // Instances shared_lut (deplacees ici pour respecter l'ordre decl-avant-usage icarus).
+    shared_lut #(.HEX("exp_lut.hex")) u_exp_lut (
+        .clk(clk), .addr(exp_idx), .q(exp_q)
+    );
+    shared_lut #(.HEX("inv_lut.hex")) u_inv_lut (
+        .clk(clk), .addr(inv_lut_idx), .q(inv_q)
+    );
 
     reg [15:0]       inv_sum;        // Q15
     reg signed [7:0] norm_shift;     // = -7 - (-shift_inv + 15) = shift_inv - 22

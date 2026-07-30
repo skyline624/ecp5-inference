@@ -73,12 +73,8 @@ module attention_head_op #(
     // pour les 2 operations (store + sum) au cycle suivant.
     wire [15:0] exp_q;
     wire [15:0] inv_q;
-    shared_lut #(.HEX("exp_lut.hex")) u_exp_lut (
-        .clk(clk), .addr(exp_idx), .q(exp_q)
-    );
-    shared_lut #(.HEX("inv_lut.hex")) u_inv_lut (
-        .clk(clk), .addr(inv_lut_idx), .q(inv_q)
-    );
+    // Instances shared_lut deplacees APRES les declarations de exp_idx / inv_lut_idx
+    // (icarus strict sur declaration-avant-usage des wires de port ; Yosys permissif).
 
     // Storage interne PACKED : 1 reg plat de T_MAX*16 bits, part-select pour
     // indexer. Force Gowin a NE PAS inferer BSRAM (lecture 1-cycle staled).
@@ -176,6 +172,15 @@ module attention_head_op #(
             sum_norm = {8'd0, sum_acc} >> (-shift_inv);
     end
     wire [7:0] inv_lut_idx = sum_norm[7:0];
+
+    // Instances shared_lut (deplacees ici pour respecter l'ordre decl-avant-usage icarus).
+    shared_lut #(.HEX("exp_lut.hex")) u_exp_lut (
+        .clk(clk), .addr(exp_idx), .q(exp_q)
+    );
+    shared_lut #(.HEX("inv_lut.hex")) u_inv_lut (
+        .clk(clk), .addr(inv_lut_idx), .q(inv_q)
+    );
+
     reg [15:0] inv_sum;
 
     reg signed [7:0] norm_shift_attn;

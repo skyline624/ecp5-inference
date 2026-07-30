@@ -48,7 +48,7 @@ module silu_op #(
     // S_LOOKUP (x_rdata valide) amorce la lecture ; S_LOOKUP_WAIT capture silu_lut_q (bon
     // 1 cycle apres — le reg addr_r aurait ajoute un cycle de trop, d'ou le wire direct).
     reg signed [15:0] silu_lut_q;
-    always @(posedge clk) silu_lut_q <= silu_lut[lut_idx_w];
+    // always @(posedge clk) silu_lut_q <= silu_lut[lut_idx_w];  -- deplace apres decl lut_idx_w (icarus)
 
     localparam S_IDLE   = 3'd0,
                S_ADDR   = 3'd1,
@@ -85,6 +85,9 @@ module silu_op #(
         (idx_signed[16])              ? 8'd0   :   // negatif -> clamp 0
         (idx_signed > 17'sd255)        ? 8'd255 :   // > 255   -> clamp 255
                                          idx_signed[7:0];
+
+    // BRAM read port registre 1 cycle (deplace ici pour respecter l'ordre decl-avant-usage icarus).
+    always @(posedge clk) silu_lut_q <= silu_lut[lut_idx_w];
 
     // ---- shift de silu_int vers int8 ----
     // out_int = silu_int >> (11 + shift_x) avec arrondi + clip

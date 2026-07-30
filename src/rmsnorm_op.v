@@ -59,9 +59,10 @@ module rmsnorm_op #(
     (* ram_style = "block" *) reg [15:0] rsqrt_lut [0:255];
     initial $readmemh("rsqrt_lut.hex", rsqrt_lut);
 
-    // BRAM read port registre 1 cycle : adresse = lut_index (wire, comme gen_seq.v rope_ridx)
+    // BRAM read port registre 1 cycle : adresse = lut_index (wire, comme gen_seq.v rope_ridx).
+    // NB: l'always est place APRES la declaration de lut_index (icarus strict sur l'ordre
+    // declaration-avant-usage ; Yosys/Verilator permissifs).
     reg [15:0] rsqrt_lut_q;
-    always @(posedge clk) rsqrt_lut_q <= rsqrt_lut[lut_index];
 
     // sqrt(2) en Q1.15 = 1.4142 * 32768 = 46341 = 0xB505
     localparam [15:0] SQRT2_Q15 = 16'hB505;
@@ -123,6 +124,9 @@ module rmsnorm_op #(
             acc_norm_w = {8'd0, acc} >> (-shift_amt);
     end
     wire [7:0] lut_index = acc_norm_w[7:0];
+
+    // BRAM read port registre 1 cycle (deplace ici pour respecter l'ordre decl-avant-usage icarus).
+    always @(posedge clk) rsqrt_lut_q <= rsqrt_lut[lut_index];
 
     // Combinational: raw_inv apres correction parite
     wire [31:0] raw_inv_sqrt2 = {16'd0, raw_inv} * SQRT2_Q15;   // 32-bit
