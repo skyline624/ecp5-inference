@@ -26,7 +26,7 @@ de dimensionnement pour tinyllamas (`dim=512`).
 | 64 (stories260K) | défaut | 5 (cache-all) | 28 525 (65 %) | 99 (92 %) | 18 (25 %) | 37,6 MHz | PASS | ~1 Mo | 17/17 (ref) | ✅ référence perf 14 tok/s |
 | 64 (stream) | NC0_PROFILE | 0 | TBD | TBD | TBD | TBD | TBD | ~1 Mo | 17/17 (Phase 5) | ✅ base stream |
 | 128 | DIM128 | 0 | 38 034 (87 %) | 10 (9 %) | 15 (21 %) | 33,43 MHz | 28,38 MHz PASS | ~5,3 Mo | 17/17 (sim+silicium) | ✅ **max single-FPGA validé silicium** |
-| 256 | DIM256 | 0 | ~~49 095 (112 %)~~ → **26 239 (59 %)** | 22 (20 %) | 15 (20 %) | ~~nextpnr fail~~ → **43,91 MHz** | **27,62 MHz PASS** | **3,64 Mo** (vocab=512) | **silicium == sim** (5/17 vs oracle : drift d'oracle préexistant) | ✅ **tourne sur silicium depuis le 30/07** |
+| 256 | DIM256 | 0 | ~~49 095 (112 %)~~ → **26 239 (59 %)** | 22 (20 %) | 15 (20 %) | ~~nextpnr fail~~ → **43,91 MHz** | **27,62 MHz PASS** | **3,64 Mo** (vocab=512) | ~~5/17 (drift oracle)~~ → **17/17 bit-exact** (fix layout LBASE) | ✅ **tourne sur silicium, bit-exact depuis le 30/07** |
 | 512 | DIM512 | 0 | ~~82 851 (189 %)~~ → **39 116 (89,2 %)** | 23 (21 %) | 19 (26 %) | à mesurer (P&R non lancé) | — | **14,16 Mo** (vocab=512) | non testé | ⚠ **LUT tient désormais** — bloqué par la SDRAM seule |
 
 > Mesures Phase 7d (build 24/07, branche `hs-param-rework-dotfix`, NODE_ONLY+FLASH_BOOT
@@ -77,18 +77,30 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > chargé **par UART** via `infer_silicon_dim128.py --dump gen_model_dump_dim256.json`, qui
 > est dim-générique (offsets dérivés de `cfg`). 57 régions, 3,82 Mo en 60 s, puis `SH` + `GO`.
 >
-> Résultat : **silicium == sim Verilator, identiques sur les 17 positions** (vérifié terme à
-> terme, pas seulement par le score) :
+> ### ✅ Le « drift d'oracle » dim=256 n'existait pas — c'était le layout SDRAM (30/07)
+> Ce document a longtemps attribué l'écart dim=256 à un « oracle drift ». **C'est faux, et
+> cette étiquette a probablement dissuadé d'enquêter.** Diagnostic complet le 30/07 :
 >
-> ```
-> silicium / sim : [46, 46, 46,  46, 417,  46, 426, 426, 426, 426, 46, 426, 46, 426,  46, 426, 426]
-> oracle Python  : [46, 46, 46, 463, 463, 463, 463, 463, 463, 463, 46,  46, 46,  46, 463, 463,  46]
-> ```
+> `CFG_LBASE` était figé à `0x010000` alors que `tok_emb` occupe `VOCAB*D` octets depuis
+> `A_EMB=0`. À dim=256, `512*256 = 0x20000` : **les poids de la couche 0 écrasaient la
+> seconde moitié de tok_emb**, soit exactement la zone du chunk 1 du lm_head. Les
+> `logits[256..511]` étaient donc calculés sur `rms_att`/`WQ`, et l'argmax ne pouvait
+> retenir que le maximum du chunk 0.
 >
-> C'est le schéma « RTL right » : quand silicium et sim concordent **bit pour bit** et
-> divergent ensemble de l'oracle aux mêmes positions, c'est l'**oracle Python** qui a un gap,
-> pas le RTL. Ce drift est **antérieur au rework** (ce document notait déjà « 5/17 sim
-> (oracle drift) » à dim=256). À corriger : `prove_gen_node.forward_node` à ce palier.
+> | profil | `tok_emb` = VOCAB×D | `LBASE` | |
+> |---|---|---|---|
+> | dim=64 | `0x08000` | `0x010000` | ok |
+> | dim=128 | `0x10000` | `0x010000` | ok, pile à la limite |
+> | **dim=256** | **`0x20000`** | `0x010000` | **collision** |
+> | dim=512 | `0x40000` | `0x010000` | collision (aurait écrasé plusieurs couches) |
+>
+> **Ni l'oracle ni le calcul du RTL n'étaient en cause** : l'oracle travaille en mémoire
+> Python (sans layout SDRAM) et donnait la bonne réponse depuis le début ; le RTL lisait
+> fidèlement une SDRAM mal remplie. Le fautif était le plan mémoire, partagé RTL + host.
+>
+> Correctif (`CFG_LBASE` dérivé de `CFG_VOCAB*CFG_D`, plancher `0x010000` pour ne rien
+> changer à dim=64/128) → **dim=256 est bit-exact 17/17 en sim**, dim=64 et dim=128
+> inchangés (17/17 chacun). dim=512 corrigé du même coup.
 >
 > ⚠ **Débit** : 607 M cycles pour 17 tokens à dim=256, contre 28,9 M à dim=64 — un **facteur
 > 21**. Le datapath restant sériel (1 élément/cycle), le coût croît en `D²` alors que la
