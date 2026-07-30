@@ -526,7 +526,13 @@ module top #(
     reg signed [7:0] gg_sh_v_out;       // shift de V after matmul
     reg [CFG_KVW*8-1:0]      gg_k_packed;       // K[KVW] storage (KVW bytes packed)
     reg [CFG_KVW*8-1:0]      gg_v_packed;       // V[KVW] storage
-    reg [CFG_D*8-1:0] x_save_packed;     // x_orig pour le residual (D bytes)
+    // x_orig pour le residual (D bytes). Array indexe et NON reg plat : tous les
+    // acces sont element-par-element (ecritures fetch_idx/rx_idx, lectures fq_idx/
+    // rx_idx), donc un reg plat + part-select dynamique ne produisait qu'un demux
+    // D:1 en ecriture et un mux D:1 en lecture — cout en O(D) pour rien. En array,
+    // yosys mappe en LUT-RAM a lecture asynchrone : meme semantique, meme timing
+    // (lecture read-before-write dans le cycle), sans le multiplexage.
+    reg [7:0] x_save [0:CFG_D-1];
     reg signed [7:0] gg_x_shift;        // shift courant du x sauve (pour residual)
     reg signed [7:0] gg_sh_o;           // shift de Wo (recu de PC)
     reg signed [7:0] gg_sh_rf;          // shift de rms_ffn (recu de PC)
@@ -618,7 +624,7 @@ module top #(
 
     // ---- Q storage : D bytes packed (H heads * HS elements) ----
     reg [CFG_D*8-1:0] Q_packed;    // D bytes
-    reg [CFG_D*8-1:0] Out_packed;  // D bytes
+    reg [7:0] out_bytes [0:CFG_D-1];  // D bytes (ex-Out_packed : array, cf. x_save)
     reg [CFG_LOG2_H:0] mh_h;        // index head courant (0..H-1 ; Phase 7 : $clog2(H):0 couvre H<=32)
     // Q_flat fourni a attention_head_op : HS bytes du head mh_h
     wire [CFG_HS*8-1:0] Q_flat = Q_packed[mh_h*(CFG_HS*8) +: CFG_HS*8];
@@ -1029,10 +1035,10 @@ module top #(
         S_GG_TX_AG     = 8'd212,   // 'G' magic
         S_GG_TX_AK     = 8'd213,   // 'K' magic
         S_GG_TX_ASH    = 8'd214,   // shift attn
-        S_GG_TX_AD     = 8'd215,   // attn_out[64] from Out_packed
+        S_GG_TX_AD     = 8'd215,   // attn_out[D] from out_bytes
         // GG v4 : + Wo + residual
         S_GG_SO        = 8'd216,   // RX sh_o (shift Wo)
-        S_GG_LOAD_ATTN = 8'd217,   // copy Out_packed -> xbuf pour Wo input
+        S_GG_LOAD_ATTN = 8'd217,   // copy out_bytes -> xbuf pour Wo input
         S_GG_SETUP_WO  = 8'd218,
         S_GG_RES_INIT  = 8'd219,   // init residual : x_orig + obuf
         S_GG_RES_RD    = 8'd220,   // obuf_raddr <= idx (BSRAM read setup)
@@ -1040,7 +1046,7 @@ module top #(
         S_GG_RES_W2    = 8'd222,
         S_GG_RES_STORE = 8'd223,   // compute aligned sum, y_int32[i] <= sum
         S_GG_RES_REQ   = 8'd224,   // jump to FQ requantize flow
-        S_GG_SAVE_X_RD = 8'd225,   // save new x (post-residual) in x_save_packed
+        S_GG_SAVE_X_RD = 8'd225,   // save new x (post-residual) in x_save
         S_GG_SAVE_X_W1 = 8'd226,
         S_GG_SAVE_X_W2 = 8'd227,
         S_GG_SAVE_X_WB = 8'd228,
@@ -1051,7 +1057,7 @@ module top #(
         S_GG_TX_XD_W   = 8'd233,   // x[64] send
         // GG v5a : + rmsnorm FFN
         S_GG_SRF       = 8'd234,   // RX sh_rms_ffn
-        S_GG_FFN_COPY_RD = 8'd235, // copy x_save_packed -> xbuf pour input rmsnorm_ffn
+        S_GG_FFN_COPY_RD = 8'd235, // copy x_save -> xbuf pour input rmsnorm_ffn
         S_GG_FFN_COPY_WB = 8'd236,
         S_GG_FFN_FETCH_RD = 8'd237, // DMA fetch rms_ffn -> wbuf
         S_GG_FFN_FETCH_WB = 8'd238,
@@ -1584,7 +1590,7 @@ module top #(
                     rx_idx <= 10'd0;   // reuse comme copy index 0..HS-1
                     state  <= S_MM_COPY1;
                 end
-                // Copie obuf[0..HS-1] -> Out_packed[mh_h*HS*8 .. +HS*8-1]
+                // Copie obuf[0..HS-1] -> out_bytes[mh_h*HS .. +HS-1]
                 S_MM_COPY1: begin
                     obuf_raddr <= rx_idx;
                     state      <= S_MM_COPY2;
@@ -1592,7 +1598,7 @@ module top #(
                 S_MM_COPY2: state <= S_MM_COPY3;
                 S_MM_COPY3: begin
                     // obuf_rdata_reg valide
-                    Out_packed[(mh_h*(CFG_HS*8)) + (rx_idx[CFG_LOG2_HS-1:0]*8) +: 8] <= obuf_rdata_reg;
+                    out_bytes[(mh_h*CFG_HS) + rx_idx[CFG_LOG2_HS-1:0]] <= obuf_rdata_reg;
                     if (rx_idx == (CFG_HS-1)) state <= S_MM_NEXT;
                     else begin rx_idx <= rx_idx + 10'd1; state <= S_MM_COPY1; end
                 end
@@ -2212,8 +2218,8 @@ module top #(
                     xbuf_waddr <= {3'd0, fetch_idx};
                     xbuf_wdata <= sd_dout;
                     xbuf_we    <= 1'b1;
-                    // in parallel : save embed in x_save_packed pour residual
-                    x_save_packed[fetch_idx[$clog2(D)-1:0]*8 +: 8] <= sd_dout;
+                    // in parallel : save embed in x_save pour residual
+                    x_save[fetch_idx[$clog2(D)-1:0]] <= sd_dout;
                     sd_addr    <= sd_addr + 23'd1;
                     if (fetch_idx == D-1) begin
                         // Embed load in xbuf. Maintenant fetch rms_w[L0] in wbuf.
@@ -2401,7 +2407,7 @@ module top #(
                     state   <= S_GG_TX_AD;
                 end
                 S_GG_TX_AD: if (!tx_busy && !tx_send) begin
-                    tx_data <= Out_packed[tx_idx[$clog2(D)-1:0]*8 +: 8];
+                    tx_data <= out_bytes[tx_idx[$clog2(D)-1:0]];
                     tx_send <= 1'b1;
                     if (tx_idx == D-1) begin
                         gg_active <= 1'b0;
@@ -2409,10 +2415,10 @@ module top #(
                     end else tx_idx <= tx_idx + 10'd1;
                 end
 
-                // ---- v4 : load attn_out from Out_packed to xbuf ----
+                // ---- v4 : load attn_out from out_bytes to xbuf ----
                 S_GG_LOAD_ATTN: begin
                     xbuf_waddr <= rx_idx;
-                    xbuf_wdata <= Out_packed[rx_idx[$clog2(D)-1:0]*8 +: 8];
+                    xbuf_wdata <= out_bytes[rx_idx[$clog2(D)-1:0]];
                     xbuf_we    <= 1'b1;
                     if (rx_idx == D-1) state <= S_GG_SETUP_WO;
                     else rx_idx <= rx_idx + 10'd1;
@@ -2451,7 +2457,7 @@ module top #(
                         reg signed [31:0] x_i32, out_i32, sum_i32;
                         reg [31:0]        absy;
                         reg signed [7:0]  sh_x_diff, sh_o_diff;
-                        x_orig_i8 = $signed(x_save_packed[{fq_idx[$clog2(D)-1:0], 3'b0} +: 8]);
+                        x_orig_i8 = $signed(x_save[fq_idx[$clog2(D)-1:0]]);
                         out_i8    = obuf_rdata_reg;
                         // sh_min = min(gg_x_shift, fq_shift_total)
                         if (gg_x_shift < fq_shift_total) begin
@@ -2485,7 +2491,7 @@ module top #(
                     end
                 end
                 // after FQ requantize (obuf contient x_after_residual int8)
-                // -> save x in x_save_packed pour le prochain layer
+                // -> save x in x_save pour le prochain layer
                 S_GG_SAVE_X_RD: begin
                     obuf_raddr <= rx_idx;
                     state      <= S_GG_SAVE_X_W1;
@@ -2493,7 +2499,7 @@ module top #(
                 S_GG_SAVE_X_W1: state <= S_GG_SAVE_X_W2;
                 S_GG_SAVE_X_W2: state <= S_GG_SAVE_X_WB;
                 S_GG_SAVE_X_WB: begin
-                    x_save_packed[rx_idx[$clog2(D)-1:0]*8 +: 8] <= obuf_rdata_reg;
+                    x_save[rx_idx[$clog2(D)-1:0]] <= obuf_rdata_reg;
                     if (rx_idx == D-1) begin
                         // Update gg_x_shift = fq_shift_total (le shift final after residual+requant)
                         gg_x_shift <= fq_shift_total;
@@ -2506,10 +2512,10 @@ module top #(
                     end
                 end
                 // ---- v5a : FFN RMSNorm ----
-                // Copy x_save_packed -> xbuf (input du rmsnorm_ffn)
+                // Copy x_save -> xbuf (input du rmsnorm_ffn)
                 S_GG_FFN_COPY_RD: begin
                     xbuf_waddr <= rx_idx;
-                    xbuf_wdata <= x_save_packed[rx_idx[$clog2(D)-1:0]*8 +: 8];
+                    xbuf_wdata <= x_save[rx_idx[$clog2(D)-1:0]];
                     xbuf_we    <= 1'b1;
                     if (rx_idx == D-1) begin
                         sd_addr   <= ADDR_RMS_FFN_L0;
@@ -3046,7 +3052,7 @@ module top #(
                         x_extra  = gg_x_shift - sh_min;
                         begin: xsave_extract
                             reg signed [7:0] x_byte;
-                            x_byte = x_save_packed[fq_idx[$clog2(D)-1:0]*8 +: 8];
+                            x_byte = x_save[fq_idx[$clog2(D)-1:0]];
                             p0_i32 = $signed({{24{gg_p0_temp[7]}}, gg_p0_temp}) <<< p0_extra;
                             p1_i32 = $signed({{24{gg_p1_temp[7]}}, gg_p1_temp}) <<< p1_extra;
                             p2_i32 = $signed({{24{partials_rdata_reg[7]}}, partials_rdata_reg}) <<< p2_extra;
@@ -3256,9 +3262,9 @@ module top #(
                         state  <= S_TX_O_RD;
                     end
                 end
-                // Multi-head TX : sends Out_packed (64 bytes) - source directe pas BSRAM
+                // Multi-head TX : sends out_bytes (D bytes) - source directe pas BSRAM
                 S_TX_MH_W: if (!tx_busy && !tx_send) begin
-                    tx_data <= Out_packed[tx_idx[$clog2(D)-1:0]*8 +: 8];
+                    tx_data <= out_bytes[tx_idx[$clog2(D)-1:0]];
                     tx_send <= 1'b1;
                     if (tx_idx == D-1) state <= S_IDLE;
                     else tx_idx <= tx_idx + 10'd1;
