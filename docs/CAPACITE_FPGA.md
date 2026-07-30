@@ -113,9 +113,27 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > ⚠ **Débit** : 607 M cycles pour 17 tokens à dim=256, contre 28,9 M à dim=64 — un **facteur
 > 21**. Le datapath restant sériel (1 élément/cycle), le coût croît en `D²` alors que la
 > logique ne croît qu'en `D`. Lever le mur LUT rend dim=256 **possible, pas rapide**
-> (~0,7 tok/s contre 14 tok/s à dim=64). Le levier de compensation existe et est intact :
-> **77 % des DSP sont inutilisés** (15/72) — paralléliser le MAC devient rentable à ce
-> palier, alors que ça ne l'était pas à dim=64 où la LUT était déjà chargée.
+> (~0,7 tok/s contre 14 tok/s à dim=64).
+>
+> ### ⚠ Le goulot n'est PAS le DSP — mesure du 30/07
+> Une version antérieure de ce document recommandait de « paralléliser le MAC, 77 % des DSP
+> étant libres ». **C'est faux.** Un MAC séquentiel consomme **1 octet de poids par cycle** ;
+> le rapport cycles/octet mesuré montre que le calcul attend déjà la mémoire :
+>
+> | profil | poids lus/token | cycles/token | **cycles par octet** | plancher MAC |
+> |---|---|---|---|---|
+> | dim=64 | 279 168 | 1,70 M | **6,1** | 1 |
+> | dim=256 | 3 820 032 | 35,7 M | **9,3** | 1 |
+>
+> À dim=256, les 3,82 Mo de poids d'un token tiendraient en 3,82 M cycles avec un seul MAC ;
+> on en dépense 35,7 M. Le DSP est donc **inoccupé ~90 % du temps** : ajouter des
+> multiplicateurs à un pipeline qui attend ses données ne rapporterait rien.
+>
+> **Le vrai levier est la bande passante mémoire** : lecture SDRAM en burst au lieu d'accès
+> octet par octet, et/ou davantage de cache BRAM. dim=256 n'utilise que **22 BRAM sur 108**
+> (car `CFG_NC=0` y désactive le cache FFN) — il y a donc de la marge pour cacher une partie
+> des poids et attaquer le goulot réel. Repère : à dim=64, les 66 % de poids servis par le
+> cache BRAM tiennent ~1,5 cycle/octet, contre ~15 pour la part lue en SDRAM.
 >
 > Reproduire le run sim dim256 hors wrapper : `$env:SIM_CYCLE_CAP="800000000"` est
 > **obligatoire** (défaut TB = 40 M cycles → timeout au 1er token).
