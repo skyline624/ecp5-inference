@@ -1419,7 +1419,18 @@ module top #(
             out_we_fm  <= 1'b0;
 
             case (state)
-                S_IDLE: if (rx_pending) begin
+                // S_IDLE ne rafraichissait PAS la SDRAM : il attendait uniquement un octet
+                // UART. Les 13 sites qui pulsent un refresh sont tous dans des etats
+                // d'activite SDRAM -> entre la fin du boot et le GO, la DRAM n'etait plus
+                // rafraichie et se dechargeait. Symptome mesure a dim256 (boot flash, image
+                // 5,13 Mo) : capture apres ~13 s -> 9/17 tokens corrects, apres 30 s -> 0/17,
+                // avec des valeurs proches des bonnes (465 vs 463) = corruption de quelques
+                // bits. Non reproductible d'un run a l'autre, ce qui excluait un bug de
+                // contenu ou d'adressage. Le refresh prime donc desormais sur le dispatch ;
+                // rx_pending est un registre, l'octet en attente survit au detour.
+                S_IDLE: if (refresh_due && !sd_busy) begin
+                    sd_refresh <= 1'b1; ret_state <= S_IDLE; state <= S_REF_BUSY;
+                end else if (rx_pending) begin
                     if      (rx_byte == "N") state <= S_M2_N;
                     else if (rx_byte == "S") state <= S_M2_S;
                     else if (rx_byte == "R") state <= S_M2_R;

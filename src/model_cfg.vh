@@ -173,3 +173,22 @@ localparam CFG_A_RMSFINAL = CFG_LBASE + CFG_NL*CFG_LSTRIDE;    // après les NL 
 localparam CFG_KV_BASE    = CFG_A_RMSFINAL + 'h10000;          // KV cache après rmsfinal (0x70000 dim 64)
 // adresse FFN couche 0 dans SDRAM (début du fill DMA boot)
 localparam CFG_WCACHE_FFN_BASE = CFG_LBASE + CFG_OFF_W1;
+
+// ---- image flash (boot autonome) : dérivée du profil, plus hardcodée ----
+// flash_boot.v DMA [0 .. FLASH_LEN) de la flash vers la SDRAM au power-up, puis lit un
+// trailer de 47 shifts à SHIFT_BASE. Ces deux valeurs étaient figées à 24'h060040 et
+// 24'h261000 dans board/gen_seq_silicon.v — la géométrie dim64 — ce qui rendait le boot
+// autonome INUTILISABLE au-delà (dim128/256 devaient charger la SDRAM par UART, ~60 s).
+// Le mirror va de 0 à la fin de rms_final ; le trailer suit, aligné sur 4 Ko.
+// Vérifié : à dim64 ces formules redonnent EXACTEMENT 0x060040 / 0x061000 (profil validé
+// silicium, donc bit-identique). Le KV (CFG_KV_BASE) n'est PAS dans l'image : il est
+// calculé à l'exécution, jamais chargé.
+// FLASH_BASE : le bitstream occupe 0..~0x140000 (cache FFN 90 BRAM), d'où 0x200000.
+localparam CFG_FLASH_BASE = 'h200000;
+localparam CFG_FLASH_LEN = CFG_A_RMSFINAL + CFG_D;                       // 0x060040 dim64
+localparam CFG_SHIFT_OFF = ((CFG_FLASH_LEN + 'hFFF)/'h1000)*'h1000;      // 0x061000 dim64
+localparam CFG_SHIFT_BASE = CFG_FLASH_BASE + CFG_SHIFT_OFF;              // 0x261000 dim64
+// Taille totale occupée en flash depuis FLASH_BASE (mirror + trailer 47 octets).
+// À FLASH_BASE=0x200000 sur un W25Q64 (8 Mo) : dim64/128/256 tiennent, dim512 non
+// (0x1441000 + 0x200000 = 23 Mo) -> dim512 restera en chargement UART.
+localparam CFG_FLASH_IMG_SZ = CFG_SHIFT_OFF + 47;

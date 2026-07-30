@@ -485,7 +485,15 @@ module gen_seq_silicon #(
     top #(
         // etape 3 : bitstream cache FFN (90 BRAM) fait ~0x140000 octets > ancien FLASH_BASE
         // 0x120000 -> chevauchait et corrompait le modele. Modele deplace @ 0x200000.
-        .FLASH_BASE(24'h200000), .FLASH_LEN(24'h060040), .SHIFT_BASE(24'h261000),
+        //
+        // FLASH_LEN / SHIFT_BASE etaient figes sur la geometrie dim64 (0x060040 / 0x261000),
+        // ce qui rendait le boot autonome inutilisable des dim128 : le DMA s'arretait au
+        // milieu du modele. Ils derivent maintenant du profil (model_cfg.vh) et redonnent
+        // EXACTEMENT les memes valeurs a dim64. dim512 ne tient pas en flash (23 Mo) et
+        // reste en chargement UART.
+        .FLASH_BASE(CFG_FLASH_BASE[23:0]),
+        .FLASH_LEN (CFG_FLASH_LEN[23:0]),
+        .SHIFT_BASE(CFG_SHIFT_BASE[23:0]),
         .SHIFT_LOAD_EN(1'b1),    .SPI_HALF_DIV(10'd1)   // step 2: shifts also from flash trailer
     ) u_n (
         .clk(clk),

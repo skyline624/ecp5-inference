@@ -12,7 +12,7 @@
 # host-side ; it only loads the tokenizer to decode the emitted tokens.
 # =============================================================================
 
-import os, sys, time
+import os, sys, time, json
 import serial
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -29,13 +29,35 @@ ORACLE = [1, 403, 407, 261, 378, 432, 383, 286, 261, 376, 298]
 
 
 def main():
+    # --dump <json> : compare aux node_tokens du dump au lieu de l'oracle dim64 hardcode.
+    # Le boot flash n'etait generalise qu'a dim64 ; depuis que FLASH_LEN/SHIFT_BASE
+    # derivent du profil (model_cfg.vh), dim128/256 bootent aussi en autonome et ont
+    # besoin de leur propre reference. Les dumps synthetiques n'ont pas de BOS en tete
+    # -> alignement direct (align=0), contrairement a l'oracle stories260K.
+    global ORACLE
+    dump = None
+    if "--dump" in sys.argv:
+        dump = sys.argv[sys.argv.index("--dump") + 1]
+        with open(dump) as f:
+            ORACLE = json.load(f)["node_tokens"][:N_TOK]
+        print(f"Reference : node_tokens de {os.path.basename(dump)} -> {ORACLE}")
+
     vocab = load_tok(TOK, VOCAB)
     print("Mode autonome : modele + shifts auto-charges depuis la flash (RR + GO seul)\n")
 
     ser = serial.Serial(PORT, BAUD, timeout=30.0)
     # flash boot (~0.5-0.6 s) + POR + SDRAM init ; wrapper gates UART while booting.
-    print("Attente fin du boot flash (~2 s)...")
-    time.sleep(2.0); ser.reset_input_buffer()
+    # Le DMA flash->SDRAM tourne a ~1 Mo/s (SPI SCK 7,8 MHz). 2 s suffisent au mirror
+    # dim64 (0x60040 = 0,4 Mo) mais PAS aux paliers superieurs : 5,13 Mo a dim256 ->
+    # ~5 s. Capturer trop tot lit une SDRAM encore incomplete. On derive l'attente de
+    # la taille reelle du modele quand --dump est fourni (marge x2).
+    wait_s = 2.0
+    if dump is not None:
+        c = json.load(open(dump))['cfg']
+        approx_mo = (c['vocab_size']*c['dim'] + c['n_layers']*8*c['dim']*c['dim']) / (1024*1024)
+        wait_s = max(2.0, approx_mo / 1.0 * 2.0)
+    print(f"Attente fin du boot flash (~{wait_s:.0f} s)...")
+    time.sleep(wait_s); ser.reset_input_buffer()
 
     # RR : reset gen_seq for 1 cycle -> expect 'RK'. Guards against gen_seq having
     # started spuriously during the flash boot (wrapper host FSM is NOT gated by
