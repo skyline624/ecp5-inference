@@ -26,12 +26,24 @@ de dimensionnement pour tinyllamas (`dim=512`).
 | 64 (stories260K) | défaut | 5 (cache-all) | 28 525 (65 %) | 99 (92 %) | 18 (25 %) | 37,6 MHz | PASS | ~1 Mo | 17/17 (ref) | ✅ référence perf 14 tok/s |
 | 64 (stream) | NC0_PROFILE | 0 | TBD | TBD | TBD | TBD | TBD | ~1 Mo | 17/17 (Phase 5) | ✅ base stream |
 | 128 | DIM128 | 0 | 38 034 (87 %) | 10 (9 %) | 15 (21 %) | 33,43 MHz | 28,38 MHz PASS | ~5,3 Mo | 17/17 (sim+silicium) | ✅ **max single-FPGA validé silicium** |
-| 256 | DIM256 | 0 | 49 095 (**112 %**) | 10 (9 %) | 15 (21 %) | n/a (nextpnr fail) | n/a | ~13 Mo | 5/17 sim (oracle drift) | ❌ **déborde LUT** + SDRAM i9 |
-| 512 | DIM512 | 0 | 82 851 (**189 %**) | 11 (10 %) | 15 (21 %) | n/a (nextpnr fail) | n/a | ~37 Mo | sim: `$readmem` fail (37 Mo > 8 Mo SDRAM) | ❌ **cluster requis** |
+| 256 | DIM256 | 0 | ~~49 095 (112 %)~~ → **40 099 (91,5 %)** | 20 (18 %) | 15 (21 %) | ~~nextpnr fail~~ → **36,67 MHz** | **25,12 MHz PASS** | ~13 Mo | non validé (oracle drift) | ⚠ **route depuis le 30/07** — mur SDRAM restant |
+| 512 | DIM512 | 0 | 82 851 (**189 %**) | 11 (10 %) | 15 (21 %) | n/a (nextpnr fail) | n/a | ~37 Mo | sim: `$readmem` fail (37 Mo > 8 Mo SDRAM) | ❌ **cluster requis** (à re-mesurer, cf. note) |
 
 > Mesures Phase 7d (build 24/07, branche `hs-param-rework-dotfix`, NODE_ONLY+FLASH_BOOT
 > +CLUSTER_NODE, NC=0 stream). `dim=64 NC=5` = ref stories260K (commit `4f73fcd`).
-> `dim=512` : yosys only (nextpnr ne fittera pas, LUT mesurée 189 %).
+>
+> ⚠ **MISE À JOUR 2026-07-30 — les lignes dim=256 et dim=512 sont périmées.** Le rework
+> « interface élément-série » de `vec_alu2`/`gen_seq` (cf. `FPGA_RESSOURCES.md` §8) a retiré
+> **−25 % de LUT à dim256** en supprimant des multiplexeurs `D:1` inutiles (datapath sériel
+> alimenté par une interface parallèle). Conséquence mesurée : **dim=256 ROUTE** sur
+> l'ECP5-45F — bitstream généré, 0 erreur, 91,5 % de logique, 36,67 MHz PASS. Le verdict
+> « déborde LUT / cluster requis » ne vaut plus pour ce palier.
+>
+> Restrictions : (a) 91,5 % de logique et 0,5 % de marge sur l'horloge IO → très tendu ;
+> (b) le **mur SDRAM subsiste** (13 Mo de poids > 8 Mo i9) donc dim=256 n'est pas exécutable
+> sur i9 stock sans weight-streaming ; (c) le bit-exact dim=256 reste non validé (drift
+> d'oracle préexistant, indépendant du rework). **dim=512 n'a pas été re-mesuré** après le
+> rework : les 189 % sont un chiffre d'avant, à refaire avant toute conclusion.
 
 ## Lecture : le mur se déplace BRAM → LUT
 

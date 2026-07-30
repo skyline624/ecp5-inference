@@ -52,7 +52,11 @@ module gen_seq #(
     parameter A_EMB      = 23'h000000,    // tok_emb (shared classifier), chunk c @ +c*0x1000
     parameter NPOS  = 17,                 // generation length (token loop)
     parameter NPR   = 16,                 // max prompt tokens for prefill (prompt_len=0 -> BOS)
-    parameter KV_BASE = 23'h070000        // KV cache SDRAM base (surcharge par CFG_KV_BASE)
+    parameter KV_BASE = 23'h070000,       // KV cache SDRAM base (surcharge par CFG_KV_BASE)
+    // TBITS promu en parameter de liste (était localparam ligne ~123) : icarus refuse
+    // qu'un localparam du body dimensionne les ports ANSI (Yosys/Verilator permissifs).
+    // Défaut 16 fixe, non surchargé par gen_seq_top -> bit-identique.
+    parameter TBITS = 16
 ) (
     input  wire            clk, rst_n, start,
     input  wire            gen_mode,      // 0 = single-shot (external x_in), 1 = autonomous generation
@@ -120,7 +124,7 @@ module gen_seq #(
     // hauts sont 0 (token <= 511) -> hi-byte [15:8] == ancien {6'd0,[9:8]} là-bas.
     // LBITS = $clog2(NCHUNK) pour lmchunk/scan_c (NCHUNK jusqu'à 500 à vocab=32000/dim=64).
     // NCHUNK=ceil(VOCAB/D) côté model_cfg.vh (integer à tous les paliers sauf dim=512).
-    localparam TBITS = 16;
+    // TBITS est desormais un parameter de liste (pour resolution des ports sous icarus).
     localparam LBITS = $clog2(NCHUNK);
     localparam LOG2_H = $clog2(H);   // head index bits (RoPE hidx slice) : 3 (H=8) .. 5 (H=32, dim512)
     // Session 6b lever #2 (vfile fusion SB_P->SB_Vc, 8->7 slots) was tried and REVERTED :
@@ -172,12 +176,28 @@ module gen_seq #(
     // ---- serialized elementwise ALU (FFN MUL, W2 reduce ADD, residual ADD) ----
     reg            alu_start, alu_op;
     reg  [1:0]     alu_next;                  // 0=MUL->HG, 1=reduce->OUTV, 2=residual->XB
-    reg  [W*D-1:0] alu_a, alu_b; reg signed [7:0] alu_sa, alu_sb;
-    wire [W*D-1:0] alu_out; wire signed [7:0] alu_out_sh; wire alu_done;
+    reg  signed [7:0] alu_sa, alu_sb;
+    wire signed [7:0] alu_out_sh; wire alu_done;
     reg  [SW-1:0]  alu_aslot, alu_bslot, alu_dslot;
+    // Interface element-serie (rework 2026-07-30) : les anciens tampons plats
+    // alu_a/alu_b/alu_out (3 * W*D bits) sont supprimes. Ils ne servaient qu'a
+    // recopier vfile -> ALU -> vfile element par element (etats ALD_A/ALD_B/AST_A,
+    // 3*D cycles) en materialisant une interface parallele pour un datapath
+    // serialise : cout = 2 mux D:1 + 1 demux D:1 dans vec_alu2, 2 demux D:1 ici,
+    // 1 mux D:1 pour relire alu_out, + 3*D*8 fils. C'est ce qui faisait scaler la
+    // LUT avec D (vec_alu2 x1,75 de dim64 a dim128). Desormais l'ALU adresse
+    // directement vfile : elle presente rd_idx/rd_sel et recoit l'octet, puis
+    // pilote wr_idx/wr_el/wr_we. L'adressage remplace le multiplexage.
+    wire [$clog2(D)-1:0] alu_rd_idx;  wire alu_rd_sel;
+    wire [$clog2(D)-1:0] alu_wr_idx;  wire [W-1:0] alu_wr_el;  wire alu_wr_we;
+    // Lecture combinatoire 1 port : le slot est choisi par rd_sel (mux 2:1 sur le
+    // numero de slot, PAS sur les donnees) et l'index par l'ALU.
+    wire [W-1:0] alu_rd_el = vfile[vidx(alu_rd_sel ? alu_bslot : alu_aslot, alu_rd_idx)];
     vec_alu2 #(W, D) u_alu (.clk(clk), .rst_n(rst_n), .start(alu_start), .op(alu_op),
-        .a(alu_a), .sa(alu_sa), .b(alu_b), .sb(alu_sb),
-        .out(alu_out), .out_sh(alu_out_sh), .done(alu_done));
+        .sa(alu_sa), .sb(alu_sb),
+        .rd_idx(alu_rd_idx), .rd_sel(alu_rd_sel), .rd_el(alu_rd_el),
+        .wr_idx(alu_wr_idx), .wr_el(alu_wr_el), .wr_we(alu_wr_we),
+        .out_sh(alu_out_sh), .done(alu_done));
 
     // rework dim Phase 7 : N sur 2 octets (couvre D>255). Paquet FQ max = header(6:
     // F,Q,Nlo,Nhi,sx,sw) + D data + addr(3) = 9+D. Nfq/resp_len inchangés (largeur pleine).
@@ -228,7 +248,10 @@ module gen_seq #(
 
     localparam IDLE=0, LOADX=1, BWAIT=2, BUILD=3, E_SET=4, E_BUSY=5, E_DONE=6, RECV=7,
                ROPEQ=8, ROPEK=9, KVWR=10, SCAN=11, RESID=12, DONE_ST=13,
-               ALD_A=14, ALD_B=15, ALU_WAIT=16, AST_A=17, FRED_COPY=18,
+               // 14/15/17 = ex-ALD_A/ALD_B/AST_A (prechargement + rangement de l'ALU),
+               // supprimes par le rework interface element-serie de vec_alu2. Codes
+               // laisses libres volontairement : ne pas renumeroter les etats suivants.
+               ALU_WAIT=16, FRED_COPY=18,
                AMAX_INIT=19, AMAX=20, E_MMRD=21, AMAXC=22, AMAXW=23,
                // KV SDRAM (étape 1) : read FSM (pulse rd -> busy=1 -> !busy -> E_MMRD)
                // + write FSM KVWR (phase K contigu ldi 0..31 @ off ldi, puis phase V
@@ -356,6 +379,11 @@ module gen_seq #(
             kv_rd<=0; kv_wr<=0;     // pulses 1-cycle (pattern v3)
             kv_refresh<=0;          // pulse 1-cycle (refresh SDRAM)
             if (vwe) vfile[vaddr] <= vdin;
+            // 2e chemin d'ecriture vfile : l'ALU serialisee rend son resultat
+            // element par element pendant que la FSM attend en ALU_WAIT (donc vwe=0
+            // -> pas de conflit ; la priorite reste a la FSM par securite). Remplace
+            // l'ancien etat AST_A qui recopiait alu_out[ldi] -> vfile en D cycles.
+            else if (alu_wr_we) vfile[vidx(alu_dslot, alu_wr_idx)] <= alu_wr_el;
 
             case (st)
                 // load external x into vfile[XB], then start the attention block
@@ -564,14 +592,14 @@ module gen_seq #(
                             PH_WO:  begin  // attention residual : XB = XB + OUTV (requantizing add)
                                     alu_aslot<=SB_XB; alu_bslot<=SB_OUTV; alu_dslot<=SB_XB;
                                     alu_op<=1'b1; alu_sa<=sxb; alu_sb<=sOut; alu_next<=2'd2;
-                                    ldi<=0; st<=ALD_A; end
+                                    ldi<=0; alu_start<=1'b1; st<=ALU_WAIT; end
                             PH_FN2: begin phase<=PH_FW1; fc<=0; st<=BUILD; end
                             PH_FW1: begin phase<=PH_FW3; st<=BUILD; end
                             PH_FW3: begin phase<=PH_SS; st<=BUILD; end
                             PH_SS:  begin  // MUL : SG(Vc) * H3(Kc) -> HG(ATT)
                                     alu_aslot<=SB_Vc; alu_bslot<=SB_Kc; alu_dslot<=SB_ATT;
                                     alu_op<=1'b0; alu_sa<=ssgc; alu_sb<=s3c; alu_next<=2'd0;
-                                    ldi<=0; st<=ALD_A; end
+                                    ldi<=0; alu_start<=1'b1; st<=ALU_WAIT; end
                             PH_EE:  begin sxb<=sw_emb; phase<=PH_FN; st<=BUILD; end   // embed done -> attention
                             PH_FNF: begin phase<=PH_LM; lmchunk<=0; st<=BUILD; end
                             PH_LM:  if (lmchunk==NCHUNK-1) st<=AMAX_INIT;   // all chunks done -> argmax
@@ -580,7 +608,7 @@ module gen_seq #(
                                     if (fc==2'd0) begin ldi<=0; st<=FRED_COPY; end
                                     else begin alu_aslot<=SB_OUTV; alu_bslot<=SB_P; alu_dslot<=SB_OUTV;
                                                alu_op<=1'b1; alu_sa<=sov; alu_sb<=spc; alu_next<=2'd1;
-                                               ldi<=0; st<=ALD_A; end
+                                               ldi<=0; alu_start<=1'b1; st<=ALU_WAIT; end
                             end
                         endcase
                     end else rcnt<=rcnt+1;
@@ -709,39 +737,44 @@ module gen_seq #(
                 end
 
                 // ---- serialized ALU sequence (MUL for SwiGLU, ADD for W2 reduce) ----
-                // load alu_a (D bytes, combinational vfile read), then alu_b, pulse start.
-                ALD_A: begin alu_a[ldi*W +: W] <= vfile[vidx(alu_aslot, ldi)];
-                        if (ldi==D-1) begin ldi<=0; st<=ALD_B; end else ldi<=ldi+1; end
-                ALD_B: begin alu_b[ldi*W +: W] <= vfile[vidx(alu_bslot, ldi)];
-                        if (ldi==D-1) begin ldi<=0; alu_start<=1'b1; st<=ALU_WAIT; end else ldi<=ldi+1; end
+                // Interface element-serie : plus de prechargement (ALD_A/ALD_B) ni de
+                // rangement (AST_A). L'ALU lit vfile[alu_aslot/alu_bslot] via
+                // rd_idx/rd_sel et ecrit vfile[alu_dslot] via wr_* pendant qu'on attend
+                // ici. Gain : 3*D cycles de copie supprimes + les 3 tampons plats.
+                // Le dispatch de l'ancien AST_A est fusionne dans ALU_WAIT (a alu_done,
+                // le dernier wr_we est encore en vol mais alu_dslot ne change qu'au
+                // cycle suivant : la derniere ecriture part dans le bon slot).
                 ALU_WAIT: if (alu_done) begin
                         case (alu_next)
                             2'd0: shc<=alu_out_sh;    // MUL -> HG shift
                             2'd1: sov<=alu_out_sh;    // reduce -> accumulator shift
                             default: sxb<=alu_out_sh; // residual -> new running XB shift
                         endcase
-                        ldi<=0; st<=AST_A;
-                    end
-                // serial-store alu_out into alu_dslot, then dispatch by alu_next
-                AST_A: begin vaddr<=vidx(alu_dslot, ldi); vdin<=alu_out[ldi*W +: W]; vwe<=1'b1;
-                        if (ldi==D-1) begin ldi<=0;
-                            case (alu_next)
-                                2'd0: begin phase<=PH_FW2; st<=BUILD; end               // MUL done -> W2
-                                2'd1: if (fc==NCHUNK_F-1) begin                        // last reduce -> FFN residual
-                                          alu_aslot<=SB_XB; alu_bslot<=SB_OUTV; alu_dslot<=SB_XB;
-                                          alu_op<=1'b1; alu_sa<=sxb; alu_sb<=sov; alu_next<=2'd2;
-                                          ldi<=0; st<=ALD_A;
-                                      end else begin fc<=fc+1; phase<=PH_FW1; st<=BUILD; end
-                                default: begin  // residual done
-                                          if (!in_ffn) begin in_ffn<=1'b1; phase<=PH_FN2; st<=BUILD; end  // attn -> FFN
-                                          else if (layer==NL-1) st<=DONE_ST;                              // last layer
-                                          else begin  // next layer : XB carries over, KV persists
-                                              layer<=layer+1; in_ffn<=1'b0; fc<=2'd0;
-                                              phase<=PH_FN; ldi<=0; st<=BUILD;
-                                          end
+                        ldi<=0;
+                        case (alu_next)
+                            2'd0: begin phase<=PH_FW2; st<=BUILD; end               // MUL done -> W2
+                            2'd1: if (fc==NCHUNK_F-1) begin                        // last reduce -> FFN residual
+                                      alu_aslot<=SB_XB; alu_bslot<=SB_OUTV; alu_dslot<=SB_XB;
+                                      // alu_sb = shift de OUTV = celui que la reduction vient
+                                      // de produire, donc alu_out_sh et NON sov : les deux
+                                      // assignations (sov<=alu_out_sh ci-dessus et celle-ci)
+                                      // ont lieu dans le MEME cycle depuis la fusion de
+                                      // AST_A dans ALU_WAIT, donc `sov` vaut encore l'ancienne
+                                      // valeur ici (non-blocking). Avant la fusion, AST_A
+                                      // intercalait D cycles et `sov` etait deja a jour.
+                                      alu_op<=1'b1; alu_sa<=sxb; alu_sb<=alu_out_sh; alu_next<=2'd2;
+                                      alu_start<=1'b1; st<=ALU_WAIT;
+                                  end else begin fc<=fc+1; phase<=PH_FW1; st<=BUILD; end
+                            default: begin  // residual done
+                                      if (!in_ffn) begin in_ffn<=1'b1; phase<=PH_FN2; st<=BUILD; end  // attn -> FFN
+                                      else if (layer==NL-1) st<=DONE_ST;                              // last layer
+                                      else begin  // next layer : XB carries over, KV persists
+                                          layer<=layer+1; in_ffn<=1'b0; fc<=2'd0;
+                                          phase<=PH_FN; st<=BUILD;
                                       end
-                            endcase
-                        end else ldi<=ldi+1; end
+                                  end
+                        endcase
+                    end
                 // fc==0 : the first W2 partial simply seeds the accumulator (no add)
                 FRED_COPY: begin vaddr<=vidx(SB_OUTV, ldi); vdin<=vfile[vidx(SB_P, ldi)]; vwe<=1'b1;
                         if (ldi==D-1) begin ldi<=0; sov<=spc; fc<=fc+1; phase<=PH_FW1; st<=BUILD; end
