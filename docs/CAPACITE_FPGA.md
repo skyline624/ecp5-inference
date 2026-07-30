@@ -77,10 +77,28 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > chargé **par UART** via `infer_silicon_dim128.py --dump gen_model_dump_dim256.json`, qui
 > est dim-générique (offsets dérivés de `cfg`). 57 régions, 3,82 Mo en 60 s, puis `SH` + `GO`.
 >
-> Résultat : **silicium == sim Verilator** (mêmes tokens, `tok[16]=426`, 5/17 vs oracle pour
-> les deux). C'est le schéma « RTL right » : quand silicium et sim concordent et divergent
-> ensemble de l'oracle, c'est l'**oracle Python** qui a un gap, pas le RTL. Ce drift est
-> **antérieur au rework** (ce document notait déjà « 5/17 sim (oracle drift) » à dim=256).
+> Résultat : **silicium == sim Verilator, identiques sur les 17 positions** (vérifié terme à
+> terme, pas seulement par le score) :
+>
+> ```
+> silicium / sim : [46, 46, 46,  46, 417,  46, 426, 426, 426, 426, 46, 426, 46, 426,  46, 426, 426]
+> oracle Python  : [46, 46, 46, 463, 463, 463, 463, 463, 463, 463, 46,  46, 46,  46, 463, 463,  46]
+> ```
+>
+> C'est le schéma « RTL right » : quand silicium et sim concordent **bit pour bit** et
+> divergent ensemble de l'oracle aux mêmes positions, c'est l'**oracle Python** qui a un gap,
+> pas le RTL. Ce drift est **antérieur au rework** (ce document notait déjà « 5/17 sim
+> (oracle drift) » à dim=256). À corriger : `prove_gen_node.forward_node` à ce palier.
+>
+> ⚠ **Débit** : 607 M cycles pour 17 tokens à dim=256, contre 28,9 M à dim=64 — un **facteur
+> 21**. Le datapath restant sériel (1 élément/cycle), le coût croît en `D²` alors que la
+> logique ne croît qu'en `D`. Lever le mur LUT rend dim=256 **possible, pas rapide**
+> (~0,7 tok/s contre 14 tok/s à dim=64). Le levier de compensation existe et est intact :
+> **77 % des DSP sont inutilisés** (15/72) — paralléliser le MAC devient rentable à ce
+> palier, alors que ça ne l'était pas à dim=64 où la LUT était déjà chargée.
+>
+> Reproduire le run sim dim256 hors wrapper : `$env:SIM_CYCLE_CAP="800000000"` est
+> **obligatoire** (défaut TB = 40 M cycles → timeout au 1er token).
 >
 > Autrement dit : **le datapath dim=256 s'exécute correctement sur la carte** ; ce qui reste
 > à corriger est l'oracle `prove_gen_node.forward_node` à ce palier, pas le RTL.
