@@ -33,14 +33,30 @@ CLK_HZ = 31_250_000             # clk_sys
 OCTETS = BENCH_N * 4
 
 
-def run_mode(ser, second_byte, label):
+def attendus():
+    """Les 4 premiers mots a l'adresse 0 = tok_emb[0..15] du dump."""
+    import json, pathlib
+    p = pathlib.Path(__file__).with_name("gen_model_dump_dim256.json")
+    if not p.exists():
+        return None
+    d = json.loads(p.read_text())
+    emb = d.get("tok_emb") or d.get("token_embedding_table")
+    if not emb:
+        return None
+    plat = [v for ligne in emb for v in ligne][:16] if isinstance(emb[0], list) else emb[:16]
+    o = [v & 0xFF for v in plat]
+    return [int.from_bytes(bytes(o[i*4:(i+1)*4]), "little") for i in range(4)]
+
+
+def run_mode(ser, second_byte, label, ref=None):
     ser.reset_input_buffer()
     ser.write(b"Z" + second_byte)
-    raw = ser.read(8)
-    if len(raw) != 8:
-        print(f"  {label:<12} FAIL : {len(raw)} octets recus au lieu de 8")
+    raw = ser.read(24)
+    if len(raw) != 24:
+        print(f"  {label:<12} FAIL : {len(raw)} octets recus au lieu de 24")
         return None
-    cycles, checksum = struct.unpack("<II", raw)
+    cycles, checksum = struct.unpack("<II", raw[:8])
+    mots = struct.unpack("<IIII", raw[8:24])
     if cycles == 0:
         print(f"  {label:<12} FAIL : compteur nul")
         return None
@@ -48,6 +64,14 @@ def run_mode(ser, second_byte, label):
     debit = OCTETS / (cycles / CLK_HZ) / 1e6
     print(f"  {label:<12} {cycles:>10,} cyc | {cyc_per_word:5.2f} cyc/mot | "
           f"{debit:6.1f} Mo/s | checksum {checksum:08x}")
+    mots_txt = " ".join(f"{m:08x}" for m in mots)
+    if ref:
+        etat = " ".join("OK " if m == r else "FAUX" for m, r in zip(mots, ref))
+        print(f"               mots 0-3 : {mots_txt}")
+        print(f"               attendus : {' '.join(f'{r:08x}' for r in ref)}")
+        print(f"               verdict  : {etat}")
+    else:
+        print(f"               mots 0-3 : {mots_txt}")
     return cycles, cyc_per_word, debit, checksum
 
 
@@ -56,8 +80,11 @@ def main():
     ser = serial.Serial(PORT, BAUD, timeout=10.0)
     time.sleep(0.2)
 
-    iso = run_mode(ser, b"Z", "ZZ isole")
-    tight = run_mode(ser, b"Y", "ZY rapproche")
+    ref = attendus()
+    if ref:
+        print(f"  (reference tok_emb[0..15] : {' '.join(f'{r:08x}' for r in ref)})\n")
+    iso = run_mode(ser, b"Z", "ZZ isole", ref)
+    tight = run_mode(ser, b"Y", "ZY rapproche", ref)
     print()
 
     if not iso or not tight:

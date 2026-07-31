@@ -340,9 +340,9 @@ module gen_seq_silicon #(
                             host_state <= H_FWD;
                         end
                         8'h5A: begin
-                            // Z -> bench SDRAM : le node renvoie 8 octets LE
-                            // (4 = compteur de cycles, 4 = checksum des mots lus).
-                            fwd_op1 <= rx_byte; fwd_idx <= 4'd0; a_drain <= 16'd8;
+                            // Z -> bench SDRAM : le node renvoie 24 octets LE
+                            // (4 cycles + 4 checksum + 16 = les 4 premiers mots lus).
+                            fwd_op1 <= rx_byte; fwd_idx <= 4'd0; a_drain <= 16'd24;
                             host_state <= H_FWD;
                         end
                         8'h53: host_state <= H_S;    // S -> SH?

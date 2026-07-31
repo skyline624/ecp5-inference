@@ -1038,6 +1038,7 @@ module top #(
         S_BENCH_TX5    = 9'd409,
         S_BENCH_TX6    = 9'd410,
         S_BENCH_TX7    = 9'd411,
+        S_BENCH_TXW    = 9'd412,
         S_M2_G         = 8'd170,
         S_GG_T0        = 8'd171,
         S_GG_T1        = 8'd172,
@@ -1247,6 +1248,11 @@ module top #(
     reg [15:0] bench_i;
     reg        bench_run;
     reg        bench_tight;                 // 1 = mode ZY (handshake minimal)
+    // 4 premiers mots lus : un checksum global dit QUE les donnees sont fausses,
+    // pas LESQUELLES. Ces 4 mots se comparent directement au dump du modele
+    // (tok_emb[0..15] a l'adresse 0) et montrent si c'est le mot 0 (donc toute la
+    // sequence) ou seulement les mots 1..3 (donc le pipeline) qui est errone.
+    reg [31:0] bench_w0, bench_w1, bench_w2, bench_w3;
     // Pour FM / FQ (N etendu a 64 pour realistic matmul wq/wo)
     reg [$clog2(D):0]  fm_row;             // 0..N-1 (N=D)
     reg [$clog2(D):0]  fm_N;               // 1..D (output count matmul)
@@ -1561,6 +1567,12 @@ module top #(
                     // mode ZY : S_BENCH_ARM a vu busy=1, on attend ici qu'il retombe).
                     if (!bench_tight || !sd_busy) begin
                         bench_sum <= bench_sum ^ sd_dout32b;   // checksum d'integrite
+                        case (bench_i[1:0])                    // 4 premiers mots
+                            2'd0: if (bench_i == 16'd0) bench_w0 <= sd_dout32b;
+                            2'd1: if (bench_i == 16'd1) bench_w1 <= sd_dout32b;
+                            2'd2: if (bench_i == 16'd2) bench_w2 <= sd_dout32b;
+                            2'd3: if (bench_i == 16'd3) bench_w3 <= sd_dout32b;
+                        endcase
                         sd_addr   <= sd_addr + 23'd4;          // mot suivant
                         if (bench_i == BENCH_N - 16'd1) begin
                             bench_run <= 1'b0;
@@ -1593,7 +1605,20 @@ module top #(
                     tx_data <= bench_sum[23:16];  tx_send <= 1'b1; state <= S_BENCH_TX7;
                 end
                 S_BENCH_TX7: if (!tx_busy && !tx_send) begin
-                    tx_data <= bench_sum[31:24];  tx_send <= 1'b1; state <= S_IDLE;
+                    tx_data <= bench_sum[31:24];  tx_send <= 1'b1;
+                    bench_i <= 16'd0; state <= S_BENCH_TXW;
+                end
+                // 16 octets : bench_w0..w3 en little-endian, octet par octet.
+                S_BENCH_TXW: if (!tx_busy && !tx_send) begin
+                    case (bench_i[3:2])
+                        2'd0: tx_data <= bench_w0[bench_i[1:0]*8 +: 8];
+                        2'd1: tx_data <= bench_w1[bench_i[1:0]*8 +: 8];
+                        2'd2: tx_data <= bench_w2[bench_i[1:0]*8 +: 8];
+                        2'd3: tx_data <= bench_w3[bench_i[1:0]*8 +: 8];
+                    endcase
+                    tx_send <= 1'b1;
+                    if (bench_i == 16'd15) state <= S_IDLE;
+                    else bench_i <= bench_i + 16'd1;
                 end
 
                 S_M2_N: if (rx_pending) begin
