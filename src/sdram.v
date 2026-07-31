@@ -96,6 +96,7 @@ localparam IDLE = 3'd2;
 localparam READ = 3'd3;
 localparam WRITE = 3'd4;
 localparam REFRESH = 3'd5;
+localparam RD_HIT  = 3'd6;   // hit du read shadow-word : pas d'acces SDRAM
 
 // RAS# CAS# WE#
 localparam CMD_SetModeReg=3'b000;
@@ -123,6 +124,20 @@ reg [22:0] addr_buf;
 //      path). See plan M2 / kianRiscV m12l64322a_ctrl.v for the RMW alternative. ----
 reg [31:0] sh_word = 32'b0;   // accumulated 32-bit word for the current byte addr
 reg [20:0] sh_addr = 21'h1FFFFF;  // addr[22:2] of the word currently in sh_word
+
+// ---- Read shadow-word : symetrique du sh_word d'ecriture ----------------------
+// La SDRAM renvoie 32 bits par acces (BURST_LEN=1), mais l'interface est OCTET :
+// le datapath streame les poids avec addr+1 a chaque octet. Sans cache, 4 octets
+// consecutifs = 4 sequences ACTIVATE+READ+precharge completes (~7 cycles chacune)
+// alors qu'ils vivent dans le MEME mot. Mesure avant optimisation : 9,3 cycles par
+// octet de poids a dim256 (35,7 M cycles/token pour 3,64 Mo lus).
+// On garde donc le dernier mot lu : si l'octet demande est dans ce mot, on le sert
+// en 2 cycles sans toucher la SDRAM. Invalide des qu'une ecriture passe (le boot
+// flash et S_LL ecrivent la SDRAM ; on invalide sans comparer l'adresse, plus sur).
+reg [31:0] rd_word  = 32'b0;
+reg [20:0] rd_waddr = 21'h1FFFFF;
+reg        rd_valid = 1'b0;
+wire       rd_hit   = rd && rd_valid && (addr[22:2] == rd_waddr);
 
 //
 // SDRAM state machine
@@ -166,7 +181,16 @@ always @(posedge clk) begin
         end
         
         // read/write/refresh
-        {IDLE, 4'bxxxx}: if (rd | wr) begin
+        // HIT du read shadow-word : l'octet demande est dans le mot deja lu -> on le
+        // sert sans acces SDRAM. busy monte quand meme 1 cycle : l'appelant attend la
+        // sequence busy=1 puis busy=0 (node_top S_OP_RD_BUSY/S_OP_RD_DONE).
+        {IDLE, 4'bxxxx}: if (rd_hit) begin
+            dout_buf <= rd_word[addr[1:0]*8 +: 8];
+            addr_buf <= addr;
+            busy     <= 1'b1;
+            cycle    <= 4'd1;
+            state    <= RD_HIT;
+        end else if (rd | wr) begin
             // bank activate
             {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_BankActivate;
             SDRAM_BA <= addr[ROW_WIDTH+COL_WIDTH+BANK_WIDTH-1+2 : ROW_WIDTH+COL_WIDTH+2];    // bank id
@@ -175,6 +199,7 @@ always @(posedge clk) begin
             addr_buf <= addr;
             if (wr) begin
                 din_buf <= din;
+                rd_valid <= 1'b0;         // une ecriture peut toucher le mot cache -> invalide
                 // shadow-word: reset on word change, accumulate target byte.
                 if (addr[22:2] != sh_addr) sh_word <= 32'b0;
                 sh_word[addr[1:0]*8 +: 8] <= din;
@@ -212,7 +237,20 @@ always @(posedge clk) begin
         {READ, T_RCD+CAS+4'd1}: begin
             data_ready <= 1'b0;
             dout_buf <= next_dout;
+            // Capture du mot pour le read shadow-word. DOIT se faire ICI et pas au
+            // cycle T_RCD+CAS : `data_ready <= 1` pose la-bas n'est visible qu'au
+            // cycle suivant, et c'est ici que dq_in porte la donnee (meme cycle que
+            // dout_buf). Capturer un cycle trop tot donne un mot nul -> poids a zero.
+            rd_word  <= dq_in;
+            rd_waddr <= addr_buf[22:2];
+            rd_valid <= 1'b1;
             busy <= 0;
+            state <= IDLE;
+        end
+
+        // hit cache lecture : dout_buf est deja pose, on relache busy
+        {RD_HIT, 4'bxxxx}: begin
+            busy  <= 1'b0;
             state <= IDLE;
         end
 
