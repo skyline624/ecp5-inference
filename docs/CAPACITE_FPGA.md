@@ -114,12 +114,12 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > cycles pour 17 tokens à dim=256, contre 28,9 M à dim=64 — un **facteur 21**. Le datapath
 > restant sériel (1 élément/cycle), le coût croît en `D²` alors que la logique ne croît
 > qu'en `D`. Lever le mur LUT rendait dim=256 **possible, pas rapide** (~0,87 tok/s contre
-> 14 tok/s à dim=64). **Le facteur est retombé à 9 depuis** (2,04 tok/s, ci-dessous).
+> 14 tok/s à dim=64). **Le facteur est retombé à 7 depuis** (2,70 tok/s, ci-dessous).
 >
-> ### ✅ Debit x2,3 par les optimisations SDRAM (31/07)
+> ### ✅ Debit x3,1 a dim256 — 4 leviers memoire + calcul (31/07)
 > **Anti-pattern : interface en octets sur une mémoire 32 bits.** La SDRAM renvoie 4 octets
 > par accès, mais le datapath streame les poids avec `addr+1` — le contrôleur relisait donc
-> **le même mot une fois par octet**. Trois leviers, chacun validé bit-exact avant le
+> **le même mot une fois par octet**. Quatre leviers, chacun validé bit-exact avant le
 > suivant :
 >
 > 1. **read shadow-word** (`src/sdram.v`) — garde le dernier mot lu, sert les 3 octets
@@ -128,37 +128,59 @@ de dimensionnement pour tinyllamas (`dim=512`).
 >    n'adresse la SDRAM que si `fetch_idx[1:0]==0`.
 > 3. **suppression du rebond `S_FM_RD`** — cet état ne servait plus qu'à rebondir vers
 >    `S_FM_WB` pour les octets déjà en `w32` : 1 cycle perdu par octet, purement structurel.
+> 4. **dot fusionné avec le fetch** — chaque octet est multiplié **à l'instant où il
+>    arrive**, dans le cycle `S_FM_WB` qui l'écrit. La passe `S_FM_DOT_ISSUE` (D+1 cycles
+>    par ligne) disparaît : le calcul devient gratuit, entièrement recouvert par l'attente
+>    mémoire.
 >
-> | palier | départ | leviers 1+2 | levier 3 | total |
+> | palier | départ | leviers 1+2 | levier 3 | levier 4 | total |
+> |---|---|---|---|---|---|
+> | dim64 (17 tok) | 28,90 M | 21,44 M | 20,22 M | **15,28 M** | −47,1 % |
+> | dim128 (17 tok) | 164,37 M | 85,79 M | 72,94 M | **55,31 M** | −66,4 % |
+> | **dim256** (/token) | **35,71 M** | 18,12 M | 15,26 M | **11,34 M** | **−68,2 %** |
+>
+> dim256 : **9,3 → 2,97 cycles par octet** de poids. Confirmé sur **silicium**, boot 100 %
+> autonome, **17/17 bit-exact à chaque palier** :
+>
+> | | départ | leviers 1+2 | levier 3 | levier 4 |
 > |---|---|---|---|---|
-> | dim64 (17 tok) | 28,90 M | 21,44 M | **20,22 M** | −30,0 % |
-> | dim128 (17 tok) | 164,37 M | 85,79 M | **72,94 M** | −55,6 % |
-> | **dim256** (/token) | **35,71 M** | 18,12 M | **15,26 M** | **−57,3 %** |
+> | s/token | 1,15 | 0,58 | 0,49 | **0,37** |
+> | tok/s | 0,87 | 1,72 | 2,04 | **2,70** |
 >
-> dim256 : **9,3 → 3,99 cycles par octet** de poids. Confirmé sur **silicium**, boot 100 %
-> autonome, **17/17 bit-exact** à chaque palier :
->
-> | | départ | leviers 1+2 | levier 3 |
-> |---|---|---|---|
-> | s/token | 1,15 | 0,58 | **0,49** |
-> | tok/s | 0,87 | 1,72 | **2,04** |
->
-> Le ×2,35 mesuré sur la carte colle au ×2,34 simulé. `clk_sys` reste à 43,5 MHz (PASS à
+> Le ×3,11 mesuré sur la carte colle au ×3,15 simulé. `clk_sys` reste à 43,5 MHz (PASS à
 > 31,25) : aucun de ces changements n'a dégradé le chemin critique.
 >
-> dim64 ne gagne que 30 % car **66 % de ses poids viennent du cache BRAM** (`CFG_NC=5`),
-> chemin non modifié — et le levier 3 lui laisse volontairement son passage par `S_FM_RD`
-> (`wcache_dout` est une BRAM 8 bits à lecture registrée, il lui faut ce cycle).
+> Le levier 4 tient à une propriété du `mac18` : il **gèle tous ses registres quand `ce=0`**
+> (`a_r`, `b_r`, `prod_r`, `acl0`, `acl1`, `acc`). Pendant les 7 cycles d'attente SDRAM d'un
+> accès, le pipeline se fige et reprend intact — la séquence vue par l'accumulateur est
+> identique à un flux continu, seule l'horloge effective est trouée. **Aucun double buffer
+> n'est nécessaire.**
 >
-> **Les gains décroissent : −49 %, −25 %, −16 %.** Les redondances grossières (relire 4× le
-> même mot) sont traitées ; il ne reste que du séquencement résiduel. Le prochain palier
-> significatif demanderait d'élargir `wbuf` à 32 bits pour écrire les 4 octets en 1 cycle
-> (−3 cycles de plus par groupe), au prix d'une refonte de la lecture côté produit scalaire.
+> ### Le budget a change de nature : tout est desormais memoire
+> Histogramme des cycles par état FSM (instrumenté dans `sim/sim_main.cpp`), dim256 :
+>
+> | poste | avant levier 4 | après |
+> |---|---|---|
+> | attente SDRAM (`S_OP_RD_*` + `S_FM_RD`) | 44,1 % | **59,2 %** |
+> | écriture `wbuf` (`S_FM_WB`) | 25,0 % | **33,7 %** |
+> | **calcul** (`S_FM_DOT_ISSUE`) | **25,1 %** | **0 %** |
+>
+> Par groupe de 4 octets : 7 cycles d'attente SDRAM + 4 d'écriture `wbuf`, soit ~11,9 cycles
+> contre 15,9. **Le MAC consomme maintenant 1 octet par cycle `S_FM_WB`** : à 2,97
+> cycles/octet il reste un facteur 3 avant qu'il devienne le mur — paralléliser les DSP
+> reste prématuré.
+>
+> Leviers restants, repondérés par cette mesure : **page ouverte / burst SDRAM (59 %)** puis
+> **`wbuf` 32 bits (34 %)**. Le premier était estimé à 13 % tant que le dot occupait un quart
+> du budget ; c'est sa disparition qui l'a rendu dominant.
 >
 > ⚠ **Leçon de méthode** : mes estimations analytiques ont été **systématiquement
 > optimistes** sur ce chantier — ×2 à 2,5 prédit pour le shadow-word (×1,32 réel),
-> 3,25 cycles/octet prédits pour la lecture 32 bits (4,74 réels). Seule la 3ᵉ (4,0 → 3,99)
-> a visé juste, une fois le modèle de coût calibré sur deux mesures. **Sur ce datapath,
+> 3,25 cycles/octet prédits pour la lecture 32 bits (4,74 réels). Les deux dernières ont
+> visé juste (4,0 → 3,99 ; −27 % → −25,6 %), une fois le modèle de coût calibré sur des
+> mesures réelles. **Et une erreur de lecture de l'histogramme** — raisonner en cycles/octet
+> là où le handshake se paie par accès — a failli faire attaquer le mauvais levier :
+> toujours ramener un compteur au **nombre d'événements qui le déclenchent**. **Sur ce datapath,
 > mesurer coûte moins cher que raisonner.**
 >
 > ### ⚠ Le goulot n'est PAS le DSP — mesure du 30/07
