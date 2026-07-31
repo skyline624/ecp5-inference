@@ -1953,7 +1953,15 @@ module top #(
                         state     <= S_FM_DOT_ADDR;
                     end else begin
                         fetch_idx <= fetch_idx + 7'd1;
-                        state     <= S_FM_RD;
+                        // Les octets 1..3 d'un mot deja lu n'ont RIEN a faire en S_FM_RD :
+                        // cet etat ne servait plus qu'a rebondir vers S_FM_WB (1 cycle perdu
+                        // par octet, purement structurel). On y reste donc, et on ne repasse
+                        // par S_FM_RD que pour l'octet 0 du mot SUIVANT (acces SDRAM reel)
+                        // -- c'est-a-dire quand l'index courant termine un groupe de 4.
+                        // Exception : le cache FFN (ffn_hit_q) sert 1 octet par cycle depuis
+                        // une BRAM 8 bits ; il lui faut le passage par S_FM_RD pour presenter
+                        // cache_addr et laisser la lecture registree s'etablir.
+                        state     <= (ffn_hit_q || fetch_idx[1:0] == 2'd3) ? S_FM_RD : S_FM_WB;
                     end
                 end
 
