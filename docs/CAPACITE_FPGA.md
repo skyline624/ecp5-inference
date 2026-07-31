@@ -231,6 +231,31 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > économisées par run ont coûté un aller-retour silicium complet. **Toute validation dim256
 > doit couvrir 17 tokens** (~5 min de sim, cap `SIM_CYCLE_CAP=800000000`).
 >
+> #### Diagnostic mené — ce qui est établi et ce qui est écarté
+> **Nature du blocage** : deadlock franc. `gen_seq` attend en RECV (`st=7`) des octets du
+> node ; le node boucle `S_IDLE → S_REF_BUSY → S_REF_DONE` (refresh au repos). Le node reçoit
+> `M`, ne reconnaît pas le second octet de la commande, repart en `S_IDLE` — et les octets
+> qu'il prend pour des commandes (`0x46 'F'`, `0x4d 'M'`, `0x53 'S'`) sont des **valeurs de
+> données**. Le flux d'octets a donc **dérivé d'un nombre inconnu en amont**.
+>
+> | hypothèse | test mené | verdict |
+> |---|---|---|
+> | vol de bus par le maître KV (mux `eff_*` prioritaire) | garde `!kv_firing` au lancement | ❌ échec identique |
+> | état FSM non décodé (`default` du `case`) | `$display` dans le `default` | ❌ 0 occurrence |
+> | la boucle de fetch dérive | trace des transitions du node | ❌ 4 cyc `WB` + 3 cyc `RD` = 7/groupe, conforme |
+> | commandes reçues corrompues | trace du dispatch | ❌ toutes valides (`M`, `F`, `S`) |
+> | `pf_armed` survit à la fin d'un matmul | sonde `[PF FUITE]` en début de matmul | ❌ 0 occurrence |
+>
+> **Piste restante pour la reprise** : le node émet-il le bon **nombre d'octets** en réponse ?
+> Le décalage étant en amont du dispatch, instrumenter le compteur d'émission (`S_TX_M1` /
+> `S_TX_O_RD`) et comparer, opération par opération, avec un run sans prefetch.
+>
+> ⚠ **Piège de durée** : quand la sim bloque, le TB tourne jusqu'à `SIM_CYCLE_CAP` (800 M à
+> dim256) alors que le blocage est à 68 M — **30 min perdues par run**. Debugger avec
+> `SIM_CYCLE_CAP=80000000` en lançant `vobj\tb_verilator.exe` **directement** :
+> `run_verilator_fb.ps1` réécrit cette variable. Et **borner toute sonde `$display`** : une
+> sonde non plafonnée dans un état atteint en boucle a produit un log de 288 Mo.
+>
 > ⚠ **Leçon de méthode** : mes estimations analytiques ont été **systématiquement
 > optimistes** sur ce chantier — ×2 à 2,5 prédit pour le shadow-word (×1,32 réel),
 > 3,25 cycles/octet prédits pour la lecture 32 bits (4,74 réels). Les deux dernières ont
