@@ -174,6 +174,34 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > **`wbuf` 32 bits (34 %)**. Le premier était estimé à 13 % tant que le dot occupait un quart
 > du budget ; c'est sa disparition qui l'a rendu dominant.
 >
+> ### ❌ Burst SDRAM : sim OK, silicium bloque (31/07, tentative abandonnée)
+> Lire **16 octets par accès** au lieu de 4 donne **−36 à −38 % de cycles en simulation**,
+> bit-exact sur les trois profils (dim64 17/17, dim128 17/17, dim256 3/3). **Le silicium ne
+> produit aucun token** : FSM bloquée, readback CC muet. Deux implémentations essayées,
+> **échec identique**. Branche `burst-sdram-wip` (commit `6ba30ce`), revert `f4c48a1`.
+>
+> Chaîne d'élimination — chaque point **mesuré**, pas supposé :
+>
+> | hypothèse | verdict |
+> |---|---|
+> | chemin critique dégradé | ❌ `clk_sys` 43,83 puis 43,05 MHz, PASS à 31,25 |
+> | carte ou flash abîmée | ❌ `322de43` rebuild+reflash redonne 17/17 à 0,37 s |
+> | puce n'applique pas `BURST_LEN=4` | ❌ une 2ᵉ version en 4 `CMD_Read` explicites (BL=1, aucune dépendance au mode register) échoue pareil |
+> | `w128` / mux 16:1 dans `node_top` | ❌ bisection : `sdram.v` seul modifié → bloque quand même |
+>
+> Reste comme **seule** différence commune aux deux essais : **lire 4 mots consécutifs**.
+> Hypothèse cohérente avec « sim OK / silicium muet » : un mot isolé ne fait piloter DQ
+> qu'un cycle et l'échantillonnage a de la marge ; un flux de 4 mots à 31,25 MHz sur une
+> horloge déphasée de 180° exige un fenêtrage précis de chaque transition. Reprise possible
+> avec un **analyseur logique** pour caler la phase d'échantillonnage DQ.
+>
+> ⚠ **Leçon de méthode — la simulation ne prouve que ce que le modèle modélise.**
+> `sim/models/sdram_chip.v` annonce dans son en-tête : *« Timing parameters (tRCD/tRP/tRC)
+> are NOT enforced »*, et il ne décode pas le mode register. Un « 3/3 bit-exact » portant
+> sur un comportement que le modèle ne représente pas **n'est pas une validation**. Corollaire
+> pratique : avant de croire une simulation sur un point de timing mémoire, vérifier que le
+> modèle a quelque chose à dire sur ce point.
+>
 > ⚠ **Leçon de méthode** : mes estimations analytiques ont été **systématiquement
 > optimistes** sur ce chantier — ×2 à 2,5 prédit pour le shadow-word (×1,32 réel),
 > 3,25 cycles/octet prédits pour la lecture 32 bits (4,74 réels). Les deux dernières ont
