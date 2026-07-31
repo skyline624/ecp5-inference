@@ -790,7 +790,21 @@ module top #(
 
     // MUX BSRAM ports : op_mh partage with attn ; op_fm prend la main pendant dot product
     wire use_attn = op_attn | op_mh;
-    assign x_raddr_op   = op_fm    ? x_raddr_fm     :
+    // Adresse xbuf du dot fusionne (dot calcule PENDANT le fetch, cf mac_ce/S_FM_WB).
+    // ATTENTION a la latence : x_raddr_fm etait un REGISTRE, ce qui ajoutait son propre
+    // cycle a la lecture registree de la BSRAM -> 2 cycles entre "poser l'adresse" et
+    // "lire la donnee". C'est ce que documentait l'ancien dot ("x_rdata_reg au cycle
+    // ISSUE dot_k=N = xbuf[N-1]"). En derivant l'adresse COMBINATOIREMENT de fetch_idx
+    // on retombe a 1 cycle, et le decalage tombe juste dans les deux cas :
+    //   S_FM_WB(k)      -> adresse k+1 -> xbuf[k+1] pret au S_FM_WB(k+1) suivant (1 cyc)
+    //   attente/S_FM_RD -> adresse k   -> xbuf[k]   pret quand S_FM_WB(k) demarre
+    // Le second cas couvre l'octet 0 d'un groupe (6 cycles de handshake SDRAM) comme le
+    // hit du cache FFN (1 seul cycle, la latence minimale -- ca tombe pile).
+    // NB largeur : fetch_idx est [$clog2(D):0] (7 bits a dim64, 9 a dim256). Pas de
+    // concatenation {3'd0, ...} ici -- elle donnerait 12 bits tronques a 10 a dim256.
+    // L'assignation a un wire [9:0] dimensionne l'addition et zero-etend proprement.
+    wire [9:0] fm_x_raddr = (state == S_FM_WB) ? (fetch_idx + 1'b1) : fetch_idx;
+    assign x_raddr_op   = op_fm    ? fm_x_raddr     :
                           use_attn ? attn_k_raddr   :
                           op_soft  ? soft_x_raddr   :
                           op_rope  ? rope_x_raddr   :
@@ -1233,9 +1247,19 @@ module top #(
     // Mult signed locaux (Gowin gotcha)
     reg signed [15:0] fm_xs16, fm_ws16;
     integer fq_i;
+    // Octet de poids EN COURS d'ecriture dans wbuf (combinatoire, disponible le cycle
+    // meme de S_FM_WB) -- exactement la source de wbuf_wdata. Alimenter le mac18 avec
+    // CA plutot qu'avec w_rdata_reg (relecture registree de wbuf) est ce qui permet de
+    // multiplier l'octet a l'instant ou il arrive, au lieu de refaire une passe de
+    // lecture apres le fetch complet. Voir S_FM_WB.
+    wire signed [7:0] fm_wbyte = ffn_hit_q ? $signed(wcache_dout)
+                               : (fetch_idx[1:0] == 2'd0) ? $signed(sd_dout)
+                                                          : $signed(w32[fetch_idx[1:0]*8 +: 8]);
+    reg signed [15:0] fm_wb16;
     always @(*) begin
         fm_xs16 = {{8{x_rdata_reg[7]}}, x_rdata_reg};
         fm_ws16 = {{8{w_rdata_reg[7]}}, w_rdata_reg};
+        fm_wb16 = {{8{fm_wbyte[7]}}, fm_wbyte};
         // leading bit position of max_abs (0..31)
         fq_lead_bit = 6'd0;
         for (fq_i = 0; fq_i < 32; fq_i = fq_i + 1)
@@ -1315,21 +1339,31 @@ module top #(
     // During DRAIN we feed a=b=0 (accumulate 0 -> pipeline empties with zeros, acc unchanged).
     // load=1 only at the k=0 issue (overwrite acc to 0+a[0]*b[0]); gg_accumulate's
     // y_int32[fm_row] base is added back in S_FM_DOT_DRAIN.
-    assign             mac_ce    = (state == S_FM_DOT_ISSUE) || (state == S_FM_DOT_DRAIN);
-    assign             mac_load  = (state == S_FM_DOT_ISSUE) && (dot_k == 7'd0);
-    // mac_a/mac_b zeroed au dot_k==0 (cycle de load) : le read xbuf 1-cycle registeré
-    // presente xbuf[stale_addr] au cycle dot_k==0 (x_raddr_fm vaut 65 = valeur résiduelle
-    // de la fin du FQ précédent, donc lit xbuf[65]). Le mac_load=1 ici fait acc <= a*b
-    // = xbuf[65]*wbuf[65] (terme STALE) au cycle acc@4. Or xbuf[65] n'est non-zero que
-    // quand le MM a écrit K dans xbuf[0..T*KVW-1] avec T*KVW>65 (T>=3, i.e. pos>=2) -> le
-    // dot FQ est corrompu d'un terme stale K[65]*V[65] à partir de pos2 (wo/wv/wq...).
-    // Zeroer mac_a/mac_b au load -> acc@4 = 0 (load propre), puis xbuf[0..63] accumulés
-    // aux cycles suivants (xbuf[k] alimenté à dot_k=k+1, sommé à acc@k+5). xbuf[0..63]
-    // (les vrais termes) ne sont PAS affectés : ils entrent via a_r aux cycles dot_k>=1.
-    assign             mac_a     = (state == S_FM_DOT_DRAIN || mac_load)
+    // ---- Dot FUSIONNE avec le fetch (mesure du 31/07) --------------------------
+    // Avant : le fetch remplissait wbuf[0..D-1], PUIS S_FM_DOT_ISSUE refaisait une
+    // passe de D+1 cycles pour relire wbuf et alimenter le mac18. Les deux etaient
+    // sequentiels -> 4 cycles de dot s'ajoutaient aux 11 de fetch par groupe de 4
+    // octets (histogramme : S_FM_DOT_ISSUE = 25,1 % du budget a lui seul).
+    //
+    // Maintenant : chaque octet est multiplie A L'INSTANT OU IL ARRIVE, dans le
+    // meme cycle S_FM_WB qui l'ecrit dans wbuf. La passe de dot disparait -- le
+    // calcul devient gratuit, entierement recouvert par l'attente memoire.
+    //
+    // Le mac18 gele quand ce=0 : pendant les 7 cycles d'attente SDRAM d'un acces,
+    // le pipeline se fige et reprend intact -- c'est exactement le comportement
+    // voulu, aucun terme n'est perdu ni double.
+    assign             mac_ce    = (state == S_FM_WB) || (state == S_FM_DOT_DRAIN);
+    assign             mac_load  = (state == S_FM_WB) && (fetch_idx == 7'd0);
+    // Plus besoin de zeroer au load (l'ancien code le faisait pour neutraliser un
+    // xbuf[65] stale) : x_raddr_fm est desormais pose EXPLICITEMENT a fetch_idx des
+    // S_FM_RD, donc xbuf[0] est bien presente au cycle du load. On charge donc la
+    // vraie valeur x[0]*w[0], ce qui rend le D+1-eme cycle a vide inutile.
+    assign             mac_a     = (state == S_FM_DOT_DRAIN)
                                   ? 18'sd0 : {{2{fm_xs16[15]}}, fm_xs16};
-    assign             mac_b     = (state == S_FM_DOT_DRAIN || mac_load)
-                                  ? 18'sd0 : {{2{fm_ws16[15]}}, fm_ws16};
+    // mac_b vient de fm_wb16 (octet en vol) et NON de fm_ws16 (relecture de wbuf) :
+    // en S_FM_WB la donnee n'est pas encore dans la BSRAM.
+    assign             mac_b     = (state == S_FM_DOT_DRAIN)
+                                  ? 18'sd0 : {{2{fm_wb16[15]}}, fm_wb16};
     reg  [1:0]         drain_cnt;
 
     assign rx_consume = rx_pending && (
@@ -1892,6 +1926,8 @@ module top #(
 
                 // Phase 1: fetch 64 bytes de la line fm_row (v3 pattern)
                 S_FM_RD: begin
+                    // (x[fetch_idx] est presente par fm_x_raddr, combinatoire -- rien a
+                    // poser ici, et rien a perdre lors d'un detour par le refresh.)
                     if (refresh_due && !sd_busy) begin
                         sd_refresh <= 1'b1; ret_state <= S_FM_RD; state <= S_REF_BUSY;
                     end else if (is_ffn_addr) begin
@@ -1944,13 +1980,14 @@ module top #(
 `endif
                     sd_addr    <= sd_addr + 23'd1;
                     if (fetch_idx == D-1) begin
-                        // line fetched -> pipelined dot via mac18 (no dot_acc init here :
-                        // mac18 load=1 overwrites acc to 0+a[0]*b[0]; gg_accumulate's
-                        // y_int32[fm_row] base is added back in S_FM_DOT_DRAIN).
+                        // Ligne entierement multipliee AU FIL du fetch : plus de passe
+                        // S_FM_DOT_ADDR/ISSUE, on enchaine directement sur le drain du
+                        // pipeline mac18 (gg_accumulate's y_int32[fm_row] base est
+                        // rajoutee dans S_FM_DOT_DRAIN, inchange).
                         fetch_idx <= 7'd0;
                         dot_k     <= 7'd0;
                         drain_cnt <= 2'd0;
-                        state     <= S_FM_DOT_ADDR;
+                        state     <= S_FM_DOT_DRAIN;
                     end else begin
                         fetch_idx <= fetch_idx + 7'd1;
                         // Les octets 1..3 d'un mot deja lu n'ont RIEN a faire en S_FM_RD :
