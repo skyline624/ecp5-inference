@@ -1214,6 +1214,18 @@ module top #(
     reg [15:0] bulk_n;
     reg [3:0]  bulk_delay;
     reg [$clog2(D):0]  fetch_idx;
+    // ---- PREFETCH du groupe de 4 octets suivant ---------------------------------
+    // Le fetch etait strictement sequentiel : demander 4 octets, ATTENDRE la SDRAM
+    // (7 cycles), puis faire les 4 multiplications (4 cycles) = 11-12 cycles par
+    // groupe. Or ces deux phases sont independantes : rien n'empeche de demander le
+    // groupe n+1 pendant qu'on multiplie le groupe n. L'attente memoire se RECOUVRE
+    // avec le calcul au lieu de s'y ajouter.
+    // pf_armed = un acces prefetche est en vol ; sa donnee sera dans sd_dout32b
+    // quand sd_busy retombera.
+    reg                pf_armed;
+    // Dernier groupe de la ligne : on n'y prefetche pas (l'adresse deborderait sur
+    // la ligne suivante alors que la FSM part en DRAIN/STORE entre-temps).
+    wire fm_last_group = (fetch_idx + 3 >= D - 1);
     // Pour FM / FQ (N etendu a 64 pour realistic matmul wq/wo)
     reg [$clog2(D):0]  fm_row;             // 0..N-1 (N=D)
     reg [$clog2(D):0]  fm_N;               // 1..D (output count matmul)
@@ -1425,6 +1437,7 @@ module top #(
             sd_wr      <= 1'b0;
             sd_refresh <= 1'b0;
             out_we_fm  <= 1'b0;
+            pf_armed   <= 1'b0;
             dot_acc    <= 32'sd0;
             op_sel     <= 4'd0;
             cn_active  <= 1'b0;
@@ -1909,6 +1922,7 @@ module top #(
 `endif
                     fm_row    <= 7'd0;
                     fetch_idx <= 7'd0;
+                    pf_armed  <= 1'b0;             // aucun prefetch en vol au demarrage
                     bulk_delay<= 4'd0;
                     state     <= S_FM_WARMUP_RD;   // dummy read pour stabiliser SDRAM
                 end
@@ -1938,6 +1952,17 @@ module top #(
                         // refresh qui reboucle sur S_FM_RD).
                         ffn_hit_q  <= 1'b1;
                         state      <= S_FM_WB;
+                    end else if (pf_armed) begin
+                        // Un acces a deja ete lance depuis S_FM_WB(0) du groupe precedent :
+                        // il ne reste qu'a attendre qu'il finisse. Les 4 multiplications
+                        // du groupe precedent ont deja consomme 4 de ses ~7 cycles.
+                        // Si sd_busy est encore haut on reste ici (pas de else) et on
+                        // reteste au cycle suivant.
+                        if (!sd_busy) begin
+                            ffn_hit_q  <= 1'b0;
+                            pf_armed   <= 1'b0;
+                            state      <= S_FM_WB;
+                        end
                     end else if (fetch_idx[1:0] != 2'd0) begin
                         // Octets 1..3 du mot deja lu : AUCUN acces SDRAM ni attente.
                         // La SDRAM renvoie 32 bits par acces ; sans ca on refaisait la
@@ -1946,6 +1971,8 @@ module top #(
                         ffn_hit_q  <= 1'b0;
                         state      <= S_FM_WB;
                     end else if (!sd_busy) begin
+                        // Pas de prefetch en vol (1er groupe d'une ligne, ou retour de
+                        // cache FFN) : acces classique.
                         ffn_hit_q  <= 1'b0;
                         sd_rd      <= 1'b1;
                         next_state <= S_FM_WB;
@@ -1958,7 +1985,21 @@ module top #(
                     // le mot complet pour les 3 suivants. Octets 1..3 : servis depuis w32.
                     // Le cache FFN (ffn_hit_q) reste octet-par-octet : wcache_dout est une
                     // BRAM 8 bits, pas concernee par le mot 32 bits.
-                    if (fetch_idx[1:0] == 2'd0 && !ffn_hit_q) w32 <= sd_dout32b;
+                    if (fetch_idx[1:0] == 2'd0 && !ffn_hit_q) begin
+                        w32 <= sd_dout32b;
+                        // PREFETCH : le mot courant est desormais dans w32, la SDRAM est
+                        // libre -> on demande TOUT DE SUITE le groupe suivant. Ses ~7
+                        // cycles d'attente vont se derouler pendant les 4 multiplications
+                        // de ce groupe-ci, au lieu de s'y ajouter.
+                        // Pas de prefetch si le maitre KV tient le bus : le mux eff_*
+                        // lui donne la PRIORITE (kv_firing ? kv_rd : sd_rd), donc notre
+                        // pulse serait masque. On attendrait alors !sd_busy en croyant
+                        // notre acces en vol, et on consommerait la donnee du KV.
+                        if (!fm_last_group && !kv_firing) begin
+                            sd_rd    <= 1'b1;
+                            pf_armed <= 1'b1;
+                        end
+                    end
                     wbuf_waddr <= {3'd0, fetch_idx};
                     wbuf_wdata <= ffn_hit_q ? wcache_dout
                                 : (fetch_idx[1:0] == 2'd0) ? sd_dout
@@ -1978,7 +2019,14 @@ module top #(
                     // sonde : adresse EFFECTIVE du 1er octet (sd_addr tel quel, non reconstruit)
                     if (fm_row == 0 && fetch_idx == 0) dbg_rdaddr_r <= sd_addr;
 `endif
-                    sd_addr    <= sd_addr + 23'd1;
+                    // sd_addr avance par GROUPE DE 4 hors cache FFN, et non par octet :
+                    // sd_rd est un REGISTRE, donc le controleur echantillonne l'adresse au
+                    // cycle SUIVANT le pulse. Elle doit deja pointer sur le groupe suivant
+                    // a cet instant. Cumul identique a l'ancien +1/octet (4 x D/4 = D), y
+                    // compris au dernier groupe ou l'avance prepare la ligne suivante.
+                    // Le cache FFN reste octet-par-octet : cache_addr en depend.
+                    if (ffn_hit_q)                   sd_addr <= sd_addr + 23'd1;
+                    else if (fetch_idx[1:0] == 2'd0) sd_addr <= sd_addr + 23'd4;
                     if (fetch_idx == D-1) begin
                         // Ligne entierement multipliee AU FIL du fetch : plus de passe
                         // S_FM_DOT_ADDR/ISSUE, on enchaine directement sur le drain du
@@ -2057,6 +2105,7 @@ module top #(
                         else begin
                             fm_row <= fm_row + 7'd1;
                             fetch_idx <= 7'd0;
+                            pf_armed  <= 1'b0;   // pas de prefetch au dernier groupe
                             state <= S_FM_RD;
                         end
                     end else begin
@@ -2073,6 +2122,7 @@ module top #(
                             else begin
                                 fm_row    <= fm_row + 7'd1;
                                 fetch_idx <= 7'd0;
+                                pf_armed  <= 1'b0;   // pas de prefetch au dernier groupe
                                 state     <= S_FM_RD;
                             end
                         end else begin
