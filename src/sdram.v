@@ -67,7 +67,8 @@ module sdram
     input       [7:0] din,          // data input, buffered at wr pulse time
     output      [7:0] dout,         // data output, available 4 cycles after rd becomes 1
                                     // output is buffered until next read request
-    output [DATA_WIDTH-1:0] dout32, // 32-bit data output
+    output [DATA_WIDTH-1:0] dout32, // 32-bit data output (valide au cycle data_ready)
+    output [DATA_WIDTH-1:0] dout32b,// 32-bit bufferise (valide quand busy retombe)
     output reg        data_ready,   // available 6 cycles after wr is set
     output reg        busy          // 0: ready for next command
 );
@@ -80,11 +81,16 @@ wire [DATA_WIDTH-1:0] dq_in = SDRAM_DQ;     // DQ input
 
 reg [1:0] off;          // byte offset
 reg [7:0] dout_buf;
+// Mot 32 bits BUFFERISE : dout32 (=dq_in) n'est valide qu'au cycle data_ready, donc
+// inutilisable par un appelant qui echantillonne quand busy retombe. dout32_buf permet
+// de consommer les 4 octets d'un seul acces au lieu d'un acces par octet.
+reg [31:0] dout32_buf = 32'b0;
 wire [7:0] next_dout =  off == 0 ? dq_in[7:0] :
                         off == 1 ? dq_in[15:8] :
                         off == 2 ? dq_in[23:16] : dq_in[31:24];
 assign dout = data_ready ? next_dout : dout_buf;
 assign dout32 = dq_in;
+assign dout32b = dout32_buf;
 assign SDRAM_CLK = clk_sdram;
 assign SDRAM_CKE = 1'b1;
 assign SDRAM_nCS = 1'b0;
@@ -185,8 +191,9 @@ always @(posedge clk) begin
         // sert sans acces SDRAM. busy monte quand meme 1 cycle : l'appelant attend la
         // sequence busy=1 puis busy=0 (node_top S_OP_RD_BUSY/S_OP_RD_DONE).
         {IDLE, 4'bxxxx}: if (rd_hit) begin
-            dout_buf <= rd_word[addr[1:0]*8 +: 8];
-            addr_buf <= addr;
+            dout_buf   <= rd_word[addr[1:0]*8 +: 8];
+            dout32_buf <= rd_word;
+            addr_buf   <= addr;
             busy     <= 1'b1;
             cycle    <= 4'd1;
             state    <= RD_HIT;
@@ -241,9 +248,10 @@ always @(posedge clk) begin
             // cycle T_RCD+CAS : `data_ready <= 1` pose la-bas n'est visible qu'au
             // cycle suivant, et c'est ici que dq_in porte la donnee (meme cycle que
             // dout_buf). Capturer un cycle trop tot donne un mot nul -> poids a zero.
-            rd_word  <= dq_in;
-            rd_waddr <= addr_buf[22:2];
-            rd_valid <= 1'b1;
+            rd_word    <= dq_in;
+            rd_waddr   <= addr_buf[22:2];
+            rd_valid   <= 1'b1;
+            dout32_buf <= dq_in;
             busy <= 0;
             state <= IDLE;
         end
