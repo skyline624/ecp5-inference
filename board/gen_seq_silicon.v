@@ -203,7 +203,9 @@ module gen_seq_silicon #(
                H_PR=4'd7, H_PRLEN=4'd8, H_PRDATA=4'd9;
     reg [3:0] host_state = H_IDLE;
     reg       run_rr_seen = 1'b0;   // RUN mode : 1er 'R' de RR vu (persiste jusqu'au 2e)
-    wire is_pt = (rx_byte==8'h4C)|(rx_byte==8'h57)|(rx_byte==8'h42)|(rx_byte==8'h43); // L W B C
+    // L W B C, + Z = bench SDRAM (node_top S_M2_Z, reponse = 4 octets)
+    wire is_pt = (rx_byte==8'h4C)|(rx_byte==8'h57)|(rx_byte==8'h42)|(rx_byte==8'h43)
+               | (rx_byte==8'h5A);
     wire fwd_accept = rx_valid & ((host_state==H_FWD) | (host_state==H_IDLE & is_pt));
     reg [7:0] fwd_buf;  reg fwd_pending;
     wire fwd_fire = fwd_pending & ~cmd_full;
@@ -335,6 +337,12 @@ module gen_seq_silicon #(
                             // L W B C -> pass-through; default drain = 2 (LL/WW ack),
                             // overridden to 2+N for CC after parsing N.
                             fwd_op1 <= rx_byte; fwd_idx <= 4'd0; a_drain <= 16'd2;
+                            host_state <= H_FWD;
+                        end
+                        8'h5A: begin
+                            // Z -> bench SDRAM : le node renvoie 8 octets LE
+                            // (4 = compteur de cycles, 4 = checksum des mots lus).
+                            fwd_op1 <= rx_byte; fwd_idx <= 4'd0; a_drain <= 16'd8;
                             host_state <= H_FWD;
                         end
                         8'h53: host_state <= H_S;    // S -> SH?

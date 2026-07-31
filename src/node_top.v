@@ -1019,6 +1019,25 @@ module top #(
         S_EE_TX_E      = 8'd168,
         S_EE_TX_K      = 8'd169,
         // GG v0 : embed lookup + rmsnorm layer 0 -> x_norm[64]
+        // ---- BENCH SDRAM ("ZZ") : mesure la crete REELLE du couple controleur+puce.
+        // Les 125 Mo/s cites jusqu'ici sont un CALCUL (32 bits x 31,25 MHz) et decrivent
+        // le bus physique, pas ce que ce controleur peut rendre : sa sequence est
+        // ACT/READ/CAS/capture = 5 cycles par mot en acces isole, soit ~25 Mo/s. Ce
+        // bench lit BENCH_N mots consecutifs et renvoie le nombre de cycles, ce qui
+        // tranche sans hypothese -- y compris sur la question qui a fait echouer le
+        // burst : la puce accepte-t-elle des acces rapproches ?
+        S_M2_Z         = 9'd400,
+        S_BENCH_RD     = 9'd401,
+        S_BENCH_NEXT   = 9'd402,
+        S_BENCH_TX0    = 9'd403,
+        S_BENCH_TX1    = 9'd404,
+        S_BENCH_TX2    = 9'd405,
+        S_BENCH_TX3    = 9'd406,
+        S_BENCH_ARM    = 9'd407,
+        S_BENCH_TX4    = 9'd408,
+        S_BENCH_TX5    = 9'd409,
+        S_BENCH_TX6    = 9'd410,
+        S_BENCH_TX7    = 9'd411,
         S_M2_G         = 8'd170,
         S_GG_T0        = 8'd171,
         S_GG_T1        = 8'd172,
@@ -1214,6 +1233,20 @@ module top #(
     reg [15:0] bulk_n;
     reg [3:0]  bulk_delay;
     reg [$clog2(D):0]  fetch_idx;
+    // ---- bench SDRAM ("ZZ" isole / "ZY" rapproche) ----
+    // ZZ : handshake complet (S_OP_RD_BUSY -> S_OP_RD_DONE), identique au datapath.
+    // ZY : handshake MINIMAL (pulse -> attend busy=1 -> reboucle), pour mesurer ce
+    //      que coute le handshake seul. NB : on ne peut pas avoir 2 acces en vol
+    //      sans modifier sdram.v (le controleur ne gere qu'une transaction) -- ZY
+    //      mesure donc le plancher du controleur ACTUEL, pas le pipelining.
+    // Les deux renvoient un CHECKSUM des mots lus : si ZY corrompt les donnees,
+    // son checksum differera de celui de ZZ (connu bon).
+    localparam [15:0] BENCH_N = 16'd4096;   // mots de 32 bits lus (16 Ko)
+    reg [31:0] bench_cnt;                   // cycles ecoules pendant la rafale
+    reg [31:0] bench_sum;                   // checksum des mots lus
+    reg [15:0] bench_i;
+    reg        bench_run;
+    reg        bench_tight;                 // 1 = mode ZY (handshake minimal)
     // Pour FM / FQ (N etendu a 64 pour realistic matmul wq/wo)
     reg [$clog2(D):0]  fm_row;             // 0..N-1 (N=D)
     reg [$clog2(D):0]  fm_N;               // 1..D (output count matmul)
@@ -1367,6 +1400,7 @@ module top #(
     reg  [1:0]         drain_cnt;
 
     assign rx_consume = rx_pending && (
+        state == S_M2_Z     ||
         state == S_IDLE     || state == S_M2_N    || state == S_M2_S   || state == S_M2_R ||
         state == S_M2_X     || state == S_M2_A    || state == S_M2_M   ||
         state == S_M2_W     || state == S_M2_B    ||
@@ -1453,6 +1487,9 @@ module top #(
             sd_wr      <= 1'b0;
             sd_refresh <= 1'b0;
             out_we_fm  <= 1'b0;
+            // Compteur du bench SDRAM : tourne pendant toute la rafale, refresh inclus
+            // (le refresh fait partie du cout reel d'un streaming soutenu).
+            if (bench_run) bench_cnt <= bench_cnt + 32'd1;
 
             case (state)
                 // S_IDLE ne rafraichissait PAS la SDRAM : il attendait uniquement un octet
@@ -1479,10 +1516,86 @@ module top #(
                     else if (rx_byte == "C") state <= S_M2_C;
                     else if (rx_byte == "F") state <= S_M2_F;
                     else if (rx_byte == "E") state <= S_M2_E;
+                    else if (rx_byte == "Z") state <= S_M2_Z;   // bench SDRAM
 `ifndef NODE_ONLY
                     else if (rx_byte == "G") state <= S_M2_G;
 `endif
                 end
+                // ---- BENCH SDRAM : "ZZ" -> lit BENCH_N mots consecutifs, renvoie le
+                // nombre de cycles sur 4 octets (LE). Aucune dependance au datapath :
+                // ce que ca mesure est le controleur + la puce, rien d'autre.
+                S_M2_Z: if (rx_pending) begin
+                    if (rx_byte == "Z" || rx_byte == "Y") begin
+                        bench_cnt   <= 32'd0;
+                        bench_sum   <= 32'd0;
+                        bench_i     <= 16'd0;
+                        bench_run   <= 1'b1;
+                        bench_tight <= (rx_byte == "Y");
+                        sd_addr     <= 23'd0;
+                        state       <= S_BENCH_RD;
+                    end else state <= S_IDLE;
+                end
+                S_BENCH_RD: begin
+                    if (refresh_due && !sd_busy) begin
+                        sd_refresh <= 1'b1; ret_state <= S_BENCH_RD; state <= S_REF_BUSY;
+                    end else if (!sd_busy) begin
+                        sd_rd <= 1'b1;
+                        // ZY : on saute S_OP_RD_BUSY/DONE et on va directement attendre
+                        // que l'acces demarre. ZZ garde le handshake du datapath.
+                        if (bench_tight) begin
+                            state      <= S_BENCH_ARM;
+                        end else begin
+                            next_state <= S_BENCH_NEXT;
+                            state      <= S_OP_RD_BUSY;
+                        end
+                    end
+                end
+                // ZY : attend que l'acces soit PRIS (busy=1) avant de reboucler. Sans
+                // cette etape on repulserait sd_rd au cycle suivant, alors que busy ne
+                // monte qu'un cycle apres le pulse -> double demande sur le meme mot.
+                S_BENCH_ARM: if (sd_busy) begin
+                    state <= S_BENCH_NEXT;
+                end
+                S_BENCH_NEXT: begin
+                    // Le mot est valide quand busy retombe (mode ZZ : on y est deja ;
+                    // mode ZY : S_BENCH_ARM a vu busy=1, on attend ici qu'il retombe).
+                    if (!bench_tight || !sd_busy) begin
+                        bench_sum <= bench_sum ^ sd_dout32b;   // checksum d'integrite
+                        sd_addr   <= sd_addr + 23'd4;          // mot suivant
+                        if (bench_i == BENCH_N - 16'd1) begin
+                            bench_run <= 1'b0;
+                            state     <= S_BENCH_TX0;
+                        end else begin
+                            bench_i <= bench_i + 16'd1;
+                            state   <= S_BENCH_RD;
+                        end
+                    end
+                end
+                S_BENCH_TX0: if (!tx_busy && !tx_send) begin
+                    tx_data <= bench_cnt[7:0];    tx_send <= 1'b1; state <= S_BENCH_TX1;
+                end
+                S_BENCH_TX1: if (!tx_busy && !tx_send) begin
+                    tx_data <= bench_cnt[15:8];   tx_send <= 1'b1; state <= S_BENCH_TX2;
+                end
+                S_BENCH_TX2: if (!tx_busy && !tx_send) begin
+                    tx_data <= bench_cnt[23:16];  tx_send <= 1'b1; state <= S_BENCH_TX3;
+                end
+                S_BENCH_TX3: if (!tx_busy && !tx_send) begin
+                    tx_data <= bench_cnt[31:24];  tx_send <= 1'b1; state <= S_BENCH_TX4;
+                end
+                S_BENCH_TX4: if (!tx_busy && !tx_send) begin
+                    tx_data <= bench_sum[7:0];    tx_send <= 1'b1; state <= S_BENCH_TX5;
+                end
+                S_BENCH_TX5: if (!tx_busy && !tx_send) begin
+                    tx_data <= bench_sum[15:8];   tx_send <= 1'b1; state <= S_BENCH_TX6;
+                end
+                S_BENCH_TX6: if (!tx_busy && !tx_send) begin
+                    tx_data <= bench_sum[23:16];  tx_send <= 1'b1; state <= S_BENCH_TX7;
+                end
+                S_BENCH_TX7: if (!tx_busy && !tx_send) begin
+                    tx_data <= bench_sum[31:24];  tx_send <= 1'b1; state <= S_IDLE;
+                end
+
                 S_M2_N: if (rx_pending) begin
                     if (rx_byte == "N") begin op_sel <= 4'd0; state <= S_NN_SX; end
                     else                state <= S_IDLE;
