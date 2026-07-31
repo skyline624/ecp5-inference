@@ -202,6 +202,35 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > pratique : avant de croire une simulation sur un point de timing mémoire, vérifier que le
 > modèle a quelque chose à dire sur ce point.
 >
+> ### ⚠ Prefetch : le débit y est (4,0 tok/s) mais casse au token 9 (31/07)
+> Lancer l'accès SDRAM du groupe n+1 depuis `S_FM_WB(0)`, pendant les 4 multiplications du
+> groupe n : l'attente mémoire se **recouvre** avec le calcul au lieu de s'y ajouter. Ne
+> touche **pas** `sdram.v` — pur séquencement dans `node_top`. Branche `prefetch-wip`
+> (`5c8a335`).
+>
+> | | avant | après | |
+> |---|---|---|---|
+> | sim dim64 (17 tok) | 15 281 128 | 13 757 792 | −10,0 % ✅ |
+> | sim dim128 (17 tok) | 55 311 521 | 38 483 153 | −30,4 % ✅ |
+> | sim dim256 (/token) | 11,34 M | 7,53 M | −33,6 % |
+> | **silicium dim256** | 0,37 s | **0,25 s (4,0 tok/s)** | **mais 9/17** |
+>
+> **Le gain de débit est réel et mesuré sur carte.** Le défaut est un blocage
+> **déterministe** : même token, même état, même index (`st=7 ph=4 idx=901 nst=0`) à chaque
+> run, en sim comme sur silicium. Ce n'est donc **pas** une course d'arbitrage de bus — qui
+> donnerait un point de rupture variable — mais un bug logique.
+>
+> **Hypothèse infirmée** : le maître KV volerait le bus (le mux `eff_*` lui donne la
+> priorité, donc un pulse `sd_rd` émis pendant `kv_firing` serait masqué, et on consommerait
+> sa donnée en croyant lire la nôtre). Ajouter la garde `!kv_firing` ne change **rien**.
+> `nst=0` pendant tout le blocage = `node_top` en `S_IDLE` : le fetch matmul n'est pas
+> l'état bloqué, c'est `gen_seq` qui attend.
+>
+> ⚠ **Piège de méthode** : dim256 avait été validé sur **3 tokens** pour aller vite. La
+> divergence est au token 9 — le test ne pouvait structurellement pas la voir. Les 5 min
+> économisées par run ont coûté un aller-retour silicium complet. **Toute validation dim256
+> doit couvrir 17 tokens** (~5 min de sim, cap `SIM_CYCLE_CAP=800000000`).
+>
 > ⚠ **Leçon de méthode** : mes estimations analytiques ont été **systématiquement
 > optimistes** sur ce chantier — ×2 à 2,5 prédit pour le shadow-word (×1,32 réel),
 > 3,25 cycles/octet prédits pour la lecture 32 bits (4,74 réels). Les deux dernières ont
