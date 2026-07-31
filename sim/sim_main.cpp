@@ -25,6 +25,63 @@ static void tick() {            // 1 cycle : front descendant puis front montant
     top->clk = 1; top->eval();
 }
 
+// ---- histogramme des cycles par etat de la FSM node_top ----------------------
+// dbg_node_state expose `state` tel quel (node_top.v:1303) : la mesure est
+// PUREMENT cote TB, aucune modif RTL, donc aucun risque d'alterer ce qu'on mesure.
+// Pourquoi l'histogramme COMPLET et pas deux compteurs S_FM_RD/S_FM_WB : l'attente
+// de la SDRAM ne se passe pas dans S_FM_RD mais dans les etats de handshake
+// S_OP_RD_BUSY/S_OP_RD_DONE (128/129). Cibler a priori aurait rate l'essentiel --
+// c'est exactement l'erreur "le goulot est le DSP" refaite un cran plus bas.
+static uint64_t st_hist[512];
+
+static const char* state_name(int s) {
+    switch (s) {
+        case 0:   return "S_IDLE";
+        case 109: return "S_FM_ROW";
+        case 110: return "S_FM_RD";
+        case 111: return "S_FM_RDW";
+        case 112: return "S_FM_WB";
+        case 113: return "S_FM_DOT_ADDR";
+        case 114: return "S_FM_DOT_ISSUE";
+        case 115: return "S_FM_DOT_DRAIN";
+        case 117: return "S_FM_STORE";
+        case 120: return "S_FQ_MAX_INIT";
+        case 121: return "S_FQ_MAX_LOOP";
+        case 122: return "S_FQ_SHIFT";
+        case 123: return "S_FQ_REQ_INIT";
+        case 124: return "S_FQ_REQ_LOOP";
+        case 125: return "S_FM_SETTLE";
+        case 126: return "S_FM_WARMUP_RD";
+        case 128: return "S_OP_RD_BUSY";
+        case 129: return "S_OP_RD_DONE";
+        case 130: return "S_OP_WR_BUSY";
+        case 131: return "S_OP_WR_DONE";
+        case 132: return "S_REF_BUSY";
+        case 133: return "S_REF_DONE";
+        default:  return "?";
+    }
+}
+
+// dump destructif (vide st_hist au fur et a mesure) : appele une seule fois.
+static void dump_hist(uint64_t total) {
+    if (!total) return;
+    printf("\n==== BUDGET CYCLES par etat FSM node_top (total=%llu) ====\n",
+           (unsigned long long)total);
+    uint64_t shown = 0;
+    for (int rank = 0; rank < 20; rank++) {
+        int best = -1;
+        for (int s = 0; s < 512; s++)
+            if (st_hist[s] && (best < 0 || st_hist[s] > st_hist[best])) best = s;
+        if (best < 0) break;
+        printf("  %-16s (%3d) %12llu  %6.2f%%\n", state_name(best), best,
+               (unsigned long long)st_hist[best], 100.0 * st_hist[best] / total);
+        shown += st_hist[best];
+        st_hist[best] = 0;
+    }
+    printf("  %-16s       %12llu  %6.2f%%\n", "(reste)",
+           (unsigned long long)(total - shown), 100.0 * (total - shown) / total);
+}
+
 // lit des mots hex (hex, sep par whitespace) dans out[], renvoie le nombre lus
 static int read_hex(const char* fn, uint64_t* out, int maxn) {
     FILE* f = fopen(fn, "r");
@@ -79,6 +136,7 @@ int main(int argc, char** argv) {
     if (const char* e = std::getenv("SIM_CYCLE_CAP")) cap = (uint64_t)strtoull(e, nullptr, 0);
     while (got < NTOK) {
         tick(); wd++;
+        st_hist[top->dbg_node_state & 0x1FF]++;   // budget cycles (voir dump_hist)
         uint8_t tv = top->token_valid & 1;
         if (tv && !tv_d) {
             int tok = (int)(top->token & 0xFFFF);      // TBITS=16 (vocab-param Phase 6)
@@ -135,12 +193,13 @@ int main(int argc, char** argv) {
                        got, NTOK, (unsigned long long)cap, (unsigned)(top->dbg_st & 0x3F),
                        (unsigned)(top->dbg_phase & 0xF), (unsigned long long)(top->dbg_idx & 0xFFF),
                        (unsigned)(top->dbg_node_state & 0x1FF));
-                       top->final(); return 1; }
+                       dump_hist(wd); top->final(); return 1; }
     }
     if (mismatch == 0)
         printf("PASS: %d/%d bit-exact vs node_tokens (Verilator untimed C++ TB)\n", got, NTOK);
     else
         printf("FAIL: %d mismatch sur %d tokens\n", mismatch, NTOK);
+    dump_hist(wd);
     top->final();
     delete top;
     return mismatch ? 1 : 0;
