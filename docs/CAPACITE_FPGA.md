@@ -110,32 +110,56 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > **dim=256 est donc un palier pleinement qualifié : il route (59 % du die), il tient en
 > mémoire (3,64 Mo), il s'exécute sur la carte, et il est bit-exact.**
 >
-> ⚠ **Débit** : 607 M cycles pour 17 tokens à dim=256, contre 28,9 M à dim=64 — un **facteur
-> 21**. Le datapath restant sériel (1 élément/cycle), le coût croît en `D²` alors que la
-> logique ne croît qu'en `D`. Lever le mur LUT rend dim=256 **possible, pas rapide**
-> (~0,7 tok/s contre 14 tok/s à dim=64).
+> ⚠ **Débit** *(chiffres d'avant les optimisations SDRAM — voir section suivante)* : 607 M
+> cycles pour 17 tokens à dim=256, contre 28,9 M à dim=64 — un **facteur 21**. Le datapath
+> restant sériel (1 élément/cycle), le coût croît en `D²` alors que la logique ne croît
+> qu'en `D`. Lever le mur LUT rendait dim=256 **possible, pas rapide** (~0,87 tok/s contre
+> 14 tok/s à dim=64). **Le facteur est retombé à 9 depuis** (2,04 tok/s, ci-dessous).
 >
-> ### ✅ Debit double par les optimisations SDRAM (31/07)
-> Le contrôleur relisait le même mot 32 bits une fois par octet : la SDRAM renvoie 4 octets
-> par accès, mais l'interface est en octets et le datapath streame les poids avec `addr+1`.
-> Deux correctifs (`src/sdram.v` + boucle de fetch `node_top`) :
-> **read shadow-word** (garde le dernier mot lu) puis **consommation des 4 octets d'un seul
-> accès** (`dout32b`, `w32`).
+> ### ✅ Debit x2,3 par les optimisations SDRAM (31/07)
+> **Anti-pattern : interface en octets sur une mémoire 32 bits.** La SDRAM renvoie 4 octets
+> par accès, mais le datapath streame les poids avec `addr+1` — le contrôleur relisait donc
+> **le même mot une fois par octet**. Trois leviers, chacun validé bit-exact avant le
+> suivant :
 >
-> | palier | cycles/token avant | après | gain |
+> 1. **read shadow-word** (`src/sdram.v`) — garde le dernier mot lu, sert les 3 octets
+>    suivants sans nouvel accès.
+> 2. **consommation des 4 octets d'un seul accès** (`dout32b` → `w32`, `node_top`) —
+>    n'adresse la SDRAM que si `fetch_idx[1:0]==0`.
+> 3. **suppression du rebond `S_FM_RD`** — cet état ne servait plus qu'à rebondir vers
+>    `S_FM_WB` pour les octets déjà en `w32` : 1 cycle perdu par octet, purement structurel.
+>
+> | palier | départ | leviers 1+2 | levier 3 | total |
+> |---|---|---|---|---|
+> | dim64 (17 tok) | 28,90 M | 21,44 M | **20,22 M** | −30,0 % |
+> | dim128 (17 tok) | 164,37 M | 85,79 M | **72,94 M** | −55,6 % |
+> | **dim256** (/token) | **35,71 M** | 18,12 M | **15,26 M** | **−57,3 %** |
+>
+> dim256 : **9,3 → 3,99 cycles par octet** de poids. Confirmé sur **silicium**, boot 100 %
+> autonome, **17/17 bit-exact** à chaque palier :
+>
+> | | départ | leviers 1+2 | levier 3 |
 > |---|---|---|---|
-> | dim64 (17 tok) | 28,90 M | **21,44 M** | −25,8 % |
-> | dim128 (17 tok) | 164,37 M | **85,79 M** | −47,8 % |
-> | **dim256** | **35,71 M** | **18,12 M** | **−49,3 %** |
+> | s/token | 1,15 | 0,58 | **0,49** |
+> | tok/s | 0,87 | 1,72 | **2,04** |
 >
-> dim256 : **9,3 → 4,74 cycles par octet** de poids, **0,88 → 1,72 tok/s**. Confirmé sur
-> **silicium** : 1,15 s → **0,58 s par token** (×1,98, conforme au ×1,96 simulé), 17/17
-> bit-exact en boot autonome. dim64 gagne moins car 66 % de ses poids viennent déjà du
-> cache BRAM (`CFG_NC=5`), chemin non modifié.
+> Le ×2,35 mesuré sur la carte colle au ×2,34 simulé. `clk_sys` reste à 43,5 MHz (PASS à
+> 31,25) : aucun de ces changements n'a dégradé le chemin critique.
 >
-> Goulot restant : ~2 cycles de FSM par octet même sans accès mémoire. Prochains leviers :
-> prefetch (masquer le fetch derrière les 4 étages du pipeline `mac18`) ou `wbuf` en 32 bits
-> pour écrire les 4 octets en un cycle.
+> dim64 ne gagne que 30 % car **66 % de ses poids viennent du cache BRAM** (`CFG_NC=5`),
+> chemin non modifié — et le levier 3 lui laisse volontairement son passage par `S_FM_RD`
+> (`wcache_dout` est une BRAM 8 bits à lecture registrée, il lui faut ce cycle).
+>
+> **Les gains décroissent : −49 %, −25 %, −16 %.** Les redondances grossières (relire 4× le
+> même mot) sont traitées ; il ne reste que du séquencement résiduel. Le prochain palier
+> significatif demanderait d'élargir `wbuf` à 32 bits pour écrire les 4 octets en 1 cycle
+> (−3 cycles de plus par groupe), au prix d'une refonte de la lecture côté produit scalaire.
+>
+> ⚠ **Leçon de méthode** : mes estimations analytiques ont été **systématiquement
+> optimistes** sur ce chantier — ×2 à 2,5 prédit pour le shadow-word (×1,32 réel),
+> 3,25 cycles/octet prédits pour la lecture 32 bits (4,74 réels). Seule la 3ᵉ (4,0 → 3,99)
+> a visé juste, une fois le modèle de coût calibré sur deux mesures. **Sur ce datapath,
+> mesurer coûte moins cher que raisonner.**
 >
 > ### ⚠ Le goulot n'est PAS le DSP — mesure du 30/07
 > Une version antérieure de ce document recommandait de « paralléliser le MAC, 77 % des DSP
