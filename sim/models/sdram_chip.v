@@ -52,35 +52,29 @@ module sdram_chip #(
     reg        dq_oe;
     assign SDRAM_DQ = dq_oe ? dq_out : 32'bz;
 
-    // read-data delay line (CAS cycles)
-    reg [31:0] rd_word;
-    reg [3:0]  rd_cnt;     // counts down to the data-valid cycle (0 = idle)
-
-    // ---- BURST de lecture (BURST_RD mots consecutifs par CMD_Read) --------------
-    // sdram.v programme BURST_LEN=4 dans le mode register depuis le 31/07 : un
-    // CMD_Read sort 4 mots sur 4 cycles consecutifs a partir de CAS. Sans ce
-    // support, ce modele ne rendait QUE le premier mot et les 3 suivants
-    // arrivaient a zero (bus relache) -> poids faux, mismatch qui accuserait a
-    // tort le controleur. En mode sequentiel l'adresse wrappe A L'INTERIEUR du
-    // bloc aligne de BURST_RD mots : seuls les 2 bits bas de la colonne tournent.
-    parameter BURST_RD = 4;
-    reg [IDX_BITS-1:0] burst_base;
-    reg [1:0]          burst_i;
-    reg                burst_run;
-    wire [IDX_BITS-1:0] burst_idx = {burst_base[IDX_BITS-1:2],
-                                     burst_base[1:0] + burst_i};
+    // ---- pipeline de lecture (CAS etages) ---------------------------------------
+    // Une vraie SDRAM accepte UN READ PAR CYCLE et rend chaque donnee CAS cycles
+    // plus tard, en pipeline : c'est ce qui permet de lire N mots consecutifs d'une
+    // meme ligne en N cycles au lieu de N activations completes.
+    // L'ancien modele n'avait qu'un seul registre (rd_word + compteur rd_cnt) : deux
+    // READ rapproches ecrasaient le premier et un seul mot sortait. Il ne modelisait
+    // donc QUE le cas d'un acces isole -- suffisant tant que le controleur n'en
+    // faisait qu'un a la fois, faux des qu'il pipeline.
+    reg [31:0] rd_pipe [0:3];
+    reg [3:0]  rd_pvld;
 
     reg [2:0] cmd;
     reg [IDX_BITS-1:0] idx;
 
     integer i;
     initial begin
-        dq_oe     = 1'b0;
-        dq_out    = 32'b0;
-        rd_cnt    = 4'd0;
-        burst_i   = 2'd0;
-        burst_run = 1'b0;
-        for (i = 0; i < 4; i = i + 1) active_row[i] = {ROW_BITS{1'b0}};
+        dq_oe   = 1'b0;
+        dq_out  = 32'b0;
+        rd_pvld = 4'b0;
+        for (i = 0; i < 4; i = i + 1) begin
+            active_row[i] = {ROW_BITS{1'b0}};
+            rd_pipe[i]    = 32'b0;
+        end
     end
 
     // Préchargement des poids du modèle en simulation. cocotb/icarus ne
@@ -109,33 +103,20 @@ module sdram_chip #(
                 if (!SDRAM_DQM[3]) mem[idx][31:24] <= SDRAM_DQ[31:24];
             end
 
-            CMD_Read: begin
-                idx        = {SDRAM_BA, active_row[SDRAM_BA], SDRAM_A[COL_BITS-1:0]};
-                burst_base <= idx;
-                rd_word    <= mem[idx];
-                rd_cnt     <= CAS[3:0];
-                burst_i    <= 2'd0;
-            end
+            CMD_Read: idx = {SDRAM_BA, active_row[SDRAM_BA], SDRAM_A[COL_BITS-1:0]};
         endcase
 
-        // read-data output pipeline : 1er mot a CAS, puis BURST_RD-1 mots suivants
-        // sur les cycles consecutifs.
-        if (rd_cnt > 4'd1) begin
-            rd_cnt <= rd_cnt - 4'd1;
-            dq_oe  <= 1'b0;
-        end else if (rd_cnt == 4'd1) begin
-            rd_cnt    <= 4'd0;
-            dq_out    <= rd_word;
-            dq_oe     <= 1'b1;        // drive data on this cycle (= read + CAS)
-            burst_i   <= 2'd1;
-            burst_run <= (BURST_RD > 1);
-        end else if (burst_run) begin
-            dq_out    <= mem[burst_idx];
-            dq_oe     <= 1'b1;
-            burst_i   <= burst_i + 2'd1;
-            if (burst_i == BURST_RD[1:0] - 2'd1) burst_run <= 1'b0;
-        end else begin
-            dq_oe  <= 1'b0;        // release the bus
+        // Pipeline de lecture : un etage par cycle, l'etage CAS-1 pilote DQ. Un READ
+        // emis au cycle t place sa donnee en tete, elle ressort sur le bus au cycle
+        // t+CAS+1 (le meme decalage que l'ancienne delay line, verifie bit-exact).
+        for (i = 3; i > 0; i = i - 1) begin
+            rd_pipe[i] <= rd_pipe[i-1];
+            rd_pvld[i] <= rd_pvld[i-1];
         end
+        rd_pipe[0] <= (cmd == CMD_Read) ? mem[idx] : 32'b0;
+        rd_pvld[0] <= (cmd == CMD_Read);
+
+        dq_out <= rd_pipe[CAS-1];
+        dq_oe  <= rd_pvld[CAS-1];
     end
 endmodule

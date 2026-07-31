@@ -115,14 +115,18 @@ localparam CMD_Write=3'b100;
 localparam CMD_Read=3'b101;
 localparam CMD_NOP=3'b111;
 
-// BURST 4 en LECTURE (16 octets par activation), single-location en ECRITURE.
-// Le bit A9 du mode register (WRITE_BURST_SINGLE) decouple les deux : sans lui, une
-// ecriture d'un octet declencherait un burst de 4 mots et corromprait les 3 voisins.
-localparam [2:0] BURST_LEN = 3'b010;    // burst length 4 mots = 16 octets
+// Mode register INCHANGE : burst length 1.
+// Le multi-mot est obtenu par 4 CMD_Read CONSECUTIFS dans la ligne ouverte, pas par
+// le burst du mode register. Raison : un BURST_LEN=4 programme ici depend de la puce
+// pour etre applique, et RIEN dans la simulation ne peut le verifier -- le modele
+// comportemental ne decode pas le mode register. Une tentative en BL=4 (31/07) a
+// passe la sim 3/3 et bloque le silicium. Avec 4 READ explicites, ce que la sim
+// verifie est exactement ce que la puce recoit, et les ecritures restent single
+// sans dependre du bit A9.
+localparam [2:0] BURST_LEN = 3'b0;      // burst length 1
 localparam BURST_MODE = 1'b0;           // sequential
-localparam WRITE_BURST_SINGLE = 1'b1;   // A9=1 : ecritures NON bursties
-localparam [10:0] MODE_REG = {1'b0, WRITE_BURST_SINGLE, 2'b00,
-                              CAS[2:0], BURST_MODE, BURST_LEN};
+localparam [10:0] MODE_REG = {4'b0, CAS[2:0], BURST_MODE, BURST_LEN};
+localparam [3:0]  RD_WORDS = 4'd4;      // mots lus par acces (4 x 32 bits = 16 octets)
 
 reg cfg_now;            // pulse for configuration
 reg [3:0] cycle;        // each operation (config/read/write) are max 7 cycles
@@ -246,36 +250,66 @@ always @(posedge clk) begin
         //  data_ready ____________________________/       \_______   
         //  busy   ________/                               \_______
         //                 `-T_RCD-'------CAS------'
-        {READ, T_RCD}: begin
+        // 4 CMD_Read consecutifs dans la ligne ouverte (cycles T_RCD .. T_RCD+3).
+        // A10=0 : PAS d'auto-precharge, sinon la ligne se fermerait apres le 1er READ.
+        // Le precharge est emis explicitement apres la derniere capture.
+        // Colonne ALIGNEE sur 4 mots : on lit le bloc de 16 octets qui CONTIENT l'octet
+        // demande, et on l'extrait a l'arrivee.
+        // ---- Lecture de 4 mots (16 octets) par 4 CMD_Read consecutifs -------------
+        // Calibre pour T_RCD=1, CAS=2 (valeurs de ce controleur). Les emissions et les
+        // captures SE CHEVAUCHENT, d'ou une sequence ecrite cycle par cycle plutot
+        // qu'avec des expressions en T_RCD/CAS : un casex ne prend QUE la premiere
+        // branche qui matche, donc deux branches tombant sur le meme cycle en
+        // perdraient une silencieusement.
+        //
+        //  cycle : 1     2     3     4     5     6     7     8
+        //  cmd   : RD0   RD1   RD2   RD3   -     -     PRE   -
+        //  DQ    :             w0    w1    w2    w3
+        //  latch :                   w0    w1    w2    w3
+        //
+        // A10=0 sur les READ : PAS d'auto-precharge, sinon la ligne se fermerait des
+        // le premier mot. Precharge explicite au cycle 7, puis T_RP avant de rendre
+        // la main -- le refresh comme le prochain ACT exigent la ligne fermee.
+        {READ, 4'd1}: begin
             {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_Read;
-            SDRAM_A[10] <= 1'b1;        // auto precharge (apres le DERNIER mot du burst)
-            // Colonne ALIGNEE sur 4 mots : le burst sequentiel wrappe a l'interieur du
-            // bloc de 4, donc partir d'une colonne non alignee rendrait les 4 mots dans
-            // le desordre. On aligne, et l'octet demande est extrait a l'arrivee.
+            SDRAM_A[10]  <= 1'b0;
+            // Colonne ALIGNEE sur 4 mots : on lit le bloc de 16 octets CONTENANT
+            // l'octet demande, et on l'extrait a l'arrivee.
             SDRAM_A[9:0] <= {1'b0, addr_buf[COL_WIDTH-1+2:4], 2'b00};
             SDRAM_DQM <= 4'b0;
             off <= addr_buf[1:0];
         end
-        {READ, T_RCD+CAS}: begin
+        {READ, 4'd2}: begin
+            {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_Read;
+            SDRAM_A[10]  <= 1'b0;
+            SDRAM_A[9:0] <= {1'b0, addr_buf[COL_WIDTH-1+2:4], 2'b01};
+        end
+        {READ, 4'd3}: begin                      // = T_RCD+CAS : 1er mot sur DQ
+            {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_Read;
+            SDRAM_A[10]  <= 1'b0;
+            SDRAM_A[9:0] <= {1'b0, addr_buf[COL_WIDTH-1+2:4], 2'b10};
             data_ready <= 1'b1;
         end
-        // Les 4 mots du burst arrivent sur 4 cycles consecutifs. La capture est decalee
-        // d'un cycle apres data_ready : `data_ready <= 1` pose au cycle T_RCD+CAS n'est
-        // visible qu'au suivant, et c'est la que dq_in porte le premier mot. Capturer un
-        // cycle trop tot donne des mots nuls -> poids a zero (deja diagnostique le 31/07).
-        {READ, T_RCD+CAS+4'd1}: begin
+        {READ, 4'd4}: begin                      // dernier READ + 1ere capture
+            {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_Read;
+            SDRAM_A[10]  <= 1'b0;
+            SDRAM_A[9:0] <= {1'b0, addr_buf[COL_WIDTH-1+2:4], 2'b11};
             data_ready <= 1'b0;
-            rd_word[31:0]   <= dq_in;
+            rd_word[31:0]  <= dq_in;
         end
-        {READ, T_RCD+CAS+4'd2}: rd_word[63:32]  <= dq_in;
-        {READ, T_RCD+CAS+4'd3}: rd_word[95:64]  <= dq_in;
-        {READ, T_RCD+CAS+4'd4}: begin
+        {READ, 4'd5}: rd_word[63:32] <= dq_in;
+        {READ, 4'd6}: rd_word[95:64] <= dq_in;
+        {READ, 4'd7}: begin
             rd_word[127:96] <= dq_in;
             // rd_full combine les 3 mots deja enregistres et dq_in (le 4e).
             dout_buf   <= rd_full[addr_buf[3:0]*8  +: 8];
             dout32_buf <= rd_full[addr_buf[3:2]*32 +: 32];
             rd_waddr   <= addr_buf[22:4];
             rd_valid   <= 1'b1;
+            {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_PreCharge;
+            SDRAM_A[10] <= 1'b1;                 // precharge ALL banks
+        end
+        {READ, 4'd7+T_RP}: begin
             busy <= 0;
             state <= IDLE;
         end
