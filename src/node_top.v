@@ -191,9 +191,8 @@ module top #(
     reg         sd_rd, sd_wr;
     reg  [7:0]  sd_din;
     wire [7:0]  sd_dout;
-    wire [31:0]  sd_dout32b;     // mot 32 bits bufferise (compat, non utilise par le fetch)
-    wire [127:0] sd_dout128;     // bloc de 16 octets du dernier burst SDRAM
-    reg  [127:0] w128;           // bloc courant en cours de consommation
+    wire [31:0] sd_dout32b;      // mot 32 bits bufferise (4 octets par acces)
+    reg  [31:0] w32;             // mot courant en cours de consommation
     wire        sd_data_ready;
     wire        sd_busy;
     // refresh : COMPTEUR SEUL. Le PULSE vient de eff_ref (mux = sd_refresh FSM principale
@@ -412,7 +411,6 @@ module top #(
         .clk(clk_sys), .clk_sdram(clk_sdram), .resetn(rst_n),
         .addr(eff_addr), .rd(eff_rd), .wr(eff_wr), .refresh(eff_ref),
         .din(eff_din), .dout(sd_dout), .dout32(), .dout32b(sd_dout32b),
-        .dout128(sd_dout128),
         .data_ready(sd_data_ready), .busy(sd_busy),
         .SDRAM_DQ(IO_sdram_dq), .SDRAM_A(O_sdram_addr), .SDRAM_BA(O_sdram_ba),
         .SDRAM_nCS(), .SDRAM_nWE(O_sdram_wen_n),
@@ -1255,8 +1253,8 @@ module top #(
     // multiplier l'octet a l'instant ou il arrive, au lieu de refaire une passe de
     // lecture apres le fetch complet. Voir S_FM_WB.
     wire signed [7:0] fm_wbyte = ffn_hit_q ? $signed(wcache_dout)
-                               : (fetch_idx[3:0] == 4'd0) ? $signed(sd_dout)
-                                                          : $signed(w128[fetch_idx[3:0]*8 +: 8]);
+                               : (fetch_idx[1:0] == 2'd0) ? $signed(sd_dout)
+                                                          : $signed(w32[fetch_idx[1:0]*8 +: 8]);
     reg signed [15:0] fm_wb16;
     always @(*) begin
         fm_xs16 = {{8{x_rdata_reg[7]}}, x_rdata_reg};
@@ -1940,12 +1938,11 @@ module top #(
                         // refresh qui reboucle sur S_FM_RD).
                         ffn_hit_q  <= 1'b1;
                         state      <= S_FM_WB;
-                    end else if (fetch_idx[3:0] != 4'd0) begin
-                        // Octets 1..15 du bloc deja lu : AUCUN acces SDRAM ni attente.
-                        // Depuis le passage du controleur en BURST 4, un acces ramene
-                        // 16 octets consecutifs ; sans ca on refaisait la sequence
-                        // complete S_FM_RD -> S_OP_RD_BUSY -> S_OP_RD_DONE -> S_FM_WB
-                        // (7 cycles d'attente memoire) pour chaque groupe de 4 octets.
+                    end else if (fetch_idx[1:0] != 2'd0) begin
+                        // Octets 1..3 du mot deja lu : AUCUN acces SDRAM ni attente.
+                        // La SDRAM renvoie 32 bits par acces ; sans ca on refaisait la
+                        // sequence complete S_FM_RD -> S_OP_RD_BUSY -> S_OP_RD_DONE ->
+                        // S_FM_WB (4-5 cycles de FSM) pour chaque octet d'un meme mot.
                         ffn_hit_q  <= 1'b0;
                         state      <= S_FM_WB;
                     end else if (!sd_busy) begin
@@ -1958,20 +1955,26 @@ module top #(
                 // S_FM_RDW obsolete
                 S_FM_WB: begin
                     // Octet 0 : vient de l'acces SDRAM qu'on vient de faire, et on capture
-                    // le BLOC de 16 octets pour les 15 suivants. Le cache FFN (ffn_hit_q)
-                    // reste octet-par-octet : wcache_dout est une BRAM 8 bits, pas
-                    // concernee par le burst.
-                    if (fetch_idx[3:0] == 4'd0 && !ffn_hit_q) w128 <= sd_dout128;
+                    // le mot complet pour les 3 suivants. Octets 1..3 : servis depuis w32.
+                    // Le cache FFN (ffn_hit_q) reste octet-par-octet : wcache_dout est une
+                    // BRAM 8 bits, pas concernee par le mot 32 bits.
+                    if (fetch_idx[1:0] == 2'd0 && !ffn_hit_q) w32 <= sd_dout32b;
                     wbuf_waddr <= {3'd0, fetch_idx};
-                    wbuf_wdata <= fm_wbyte;   // meme source que le mac18 (dot fusionne)
+                    wbuf_wdata <= ffn_hit_q ? wcache_dout
+                                : (fetch_idx[1:0] == 2'd0) ? sd_dout
+                                                           : w32[fetch_idx[1:0]*8 +: 8];
                     wbuf_we    <= 1'b1;
 `ifdef SIM
-                    // sonde : 4 premiers octets de la ligne 0 (poids reellement charges).
-                    // Passe par fm_wbyte : une sonde qui RECONSTRUIT la source diverge du
-                    // jour ou celle-ci change (elle affichait fcfcfcfc apres le passage au
-                    // mot 32 bits, sur des donnees pourtant justes -> faux diagnostic).
+                    // sonde : 4 premiers octets de la ligne 0 (poids reellement charges)
+                    // NB: capture la donnee REELLEMENT ecrite. Depuis la lecture par mot
+                    // de 32 bits, les octets 1..3 viennent de w32 et non de sd_dout ; une
+                    // sonde restee sur sd_dout affichait fcfcfcfc (l'octet 0 repete) alors
+                    // que les donnees etaient justes -> faux positif de diagnostic.
                     if (fm_row == 0 && fetch_idx < 4)
-                        dbg_wrow0_r[fetch_idx[1:0]*8 +: 8] <= fm_wbyte;
+                        dbg_wrow0_r[fetch_idx[1:0]*8 +: 8] <=
+                            ffn_hit_q ? wcache_dout
+                          : (fetch_idx[1:0] == 2'd0) ? sd_dout
+                                                     : w32[fetch_idx[1:0]*8 +: 8];
                     // sonde : adresse EFFECTIVE du 1er octet (sd_addr tel quel, non reconstruit)
                     if (fm_row == 0 && fetch_idx == 0) dbg_rdaddr_r <= sd_addr;
 `endif
@@ -1987,15 +1990,15 @@ module top #(
                         state     <= S_FM_DOT_DRAIN;
                     end else begin
                         fetch_idx <= fetch_idx + 7'd1;
-                        // Les octets 1..15 d'un bloc deja lu n'ont RIEN a faire en S_FM_RD :
-                        // cet etat ne sert qu'a declencher un acces SDRAM reel. On y reste
-                        // donc, et on ne repasse par S_FM_RD que pour l'octet 0 du BLOC
-                        // suivant -- c'est-a-dire quand l'index courant termine un groupe
-                        // de 16 (taille du burst).
+                        // Les octets 1..3 d'un mot deja lu n'ont RIEN a faire en S_FM_RD :
+                        // cet etat ne servait plus qu'a rebondir vers S_FM_WB (1 cycle perdu
+                        // par octet, purement structurel). On y reste donc, et on ne repasse
+                        // par S_FM_RD que pour l'octet 0 du mot SUIVANT (acces SDRAM reel)
+                        // -- c'est-a-dire quand l'index courant termine un groupe de 4.
                         // Exception : le cache FFN (ffn_hit_q) sert 1 octet par cycle depuis
                         // une BRAM 8 bits ; il lui faut le passage par S_FM_RD pour presenter
                         // cache_addr et laisser la lecture registree s'etablir.
-                        state     <= (ffn_hit_q || fetch_idx[3:0] == 4'd15) ? S_FM_RD : S_FM_WB;
+                        state     <= (ffn_hit_q || fetch_idx[1:0] == 2'd3) ? S_FM_RD : S_FM_WB;
                     end
                 end
 

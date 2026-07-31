@@ -69,7 +69,6 @@ module sdram
                                     // output is buffered until next read request
     output [DATA_WIDTH-1:0] dout32, // 32-bit data output (valide au cycle data_ready)
     output [DATA_WIDTH-1:0] dout32b,// 32-bit bufferise (valide quand busy retombe)
-    output [127:0]    dout128,      // bloc de 16 octets du dernier burst (idem)
     output reg        data_ready,   // available 6 cycles after wr is set
     output reg        busy          // 0: ready for next command
 );
@@ -92,7 +91,6 @@ wire [7:0] next_dout =  off == 0 ? dq_in[7:0] :
 assign dout = data_ready ? next_dout : dout_buf;
 assign dout32 = dq_in;
 assign dout32b = dout32_buf;
-// (assign dout128 place plus bas : rd_word est declare apres ce point)
 assign SDRAM_CLK = clk_sdram;
 assign SDRAM_CKE = 1'b1;
 assign SDRAM_nCS = 1'b0;
@@ -115,14 +113,9 @@ localparam CMD_Write=3'b100;
 localparam CMD_Read=3'b101;
 localparam CMD_NOP=3'b111;
 
-// BURST 4 en LECTURE (16 octets par activation), single-location en ECRITURE.
-// Le bit A9 du mode register (WRITE_BURST_SINGLE) decouple les deux : sans lui, une
-// ecriture d'un octet declencherait un burst de 4 mots et corromprait les 3 voisins.
-localparam [2:0] BURST_LEN = 3'b010;    // burst length 4 mots = 16 octets
+localparam [2:0] BURST_LEN = 3'b0;      // burst length 1
 localparam BURST_MODE = 1'b0;           // sequential
-localparam WRITE_BURST_SINGLE = 1'b1;   // A9=1 : ecritures NON bursties
-localparam [10:0] MODE_REG = {1'b0, WRITE_BURST_SINGLE, 2'b00,
-                              CAS[2:0], BURST_MODE, BURST_LEN};
+localparam [10:0] MODE_REG = {4'b0, CAS[2:0], BURST_MODE, BURST_LEN};
 
 reg cfg_now;            // pulse for configuration
 reg [3:0] cycle;        // each operation (config/read/write) are max 7 cycles
@@ -147,18 +140,10 @@ reg [20:0] sh_addr = 21'h1FFFFF;  // addr[22:2] of the word currently in sh_word
 // On garde donc le dernier mot lu : si l'octet demande est dans ce mot, on le sert
 // en 2 cycles sans toucher la SDRAM. Invalide des qu'une ecriture passe (le boot
 // flash et S_LL ecrivent la SDRAM ; on invalide sans comparer l'adresse, plus sur).
-// Depuis le passage en BURST 4 : le cache couvre 16 octets (4 mots) et non plus 4.
-// Une activation de ligne sert donc 16 octets consecutifs -- CAS et handshake busy
-// sont amortis sur 4x plus de donnees. Mesure du 31/07 avant ce changement :
-// 7 cycles d'attente memoire par acces de 4 octets, soit 59 % du budget.
-reg [127:0] rd_word  = 128'b0;
-reg [18:0]  rd_waddr = 19'h7FFFF;      // addr[22:4] du bloc de 16 octets en cache
-reg         rd_valid = 1'b0;
-wire        rd_hit   = rd && rd_valid && (addr[22:4] == rd_waddr);
-// Mot complet a l'instant de la DERNIERE capture du burst : rd_word[95:0] porte deja
-// les mots 0..2, dq_in porte le mot 3 (non encore enregistre).
-wire [127:0] rd_full = {dq_in, rd_word[95:0]};
-assign dout128 = rd_word;
+reg [31:0] rd_word  = 32'b0;
+reg [20:0] rd_waddr = 21'h1FFFFF;
+reg        rd_valid = 1'b0;
+wire       rd_hit   = rd && rd_valid && (addr[22:2] == rd_waddr);
 
 //
 // SDRAM state machine
@@ -206,8 +191,8 @@ always @(posedge clk) begin
         // sert sans acces SDRAM. busy monte quand meme 1 cycle : l'appelant attend la
         // sequence busy=1 puis busy=0 (node_top S_OP_RD_BUSY/S_OP_RD_DONE).
         {IDLE, 4'bxxxx}: if (rd_hit) begin
-            dout_buf   <= rd_word[addr[3:0]*8 +: 8];
-            dout32_buf <= rd_word[addr[3:2]*32 +: 32];
+            dout_buf   <= rd_word[addr[1:0]*8 +: 8];
+            dout32_buf <= rd_word;
             addr_buf   <= addr;
             busy     <= 1'b1;
             cycle    <= 4'd1;
@@ -248,34 +233,25 @@ always @(posedge clk) begin
         //                 `-T_RCD-'------CAS------'
         {READ, T_RCD}: begin
             {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_Read;
-            SDRAM_A[10] <= 1'b1;        // auto precharge (apres le DERNIER mot du burst)
-            // Colonne ALIGNEE sur 4 mots : le burst sequentiel wrappe a l'interieur du
-            // bloc de 4, donc partir d'une colonne non alignee rendrait les 4 mots dans
-            // le desordre. On aligne, et l'octet demande est extrait a l'arrivee.
-            SDRAM_A[9:0] <= {1'b0, addr_buf[COL_WIDTH-1+2:4], 2'b00};
+            SDRAM_A[10] <= 1'b1;        // set auto precharge
+            SDRAM_A[9:0] <= {1'b0, addr_buf[COL_WIDTH-1+2:2]};  // column address
             SDRAM_DQM <= 4'b0;
             off <= addr_buf[1:0];
         end
         {READ, T_RCD+CAS}: begin
             data_ready <= 1'b1;
         end
-        // Les 4 mots du burst arrivent sur 4 cycles consecutifs. La capture est decalee
-        // d'un cycle apres data_ready : `data_ready <= 1` pose au cycle T_RCD+CAS n'est
-        // visible qu'au suivant, et c'est la que dq_in porte le premier mot. Capturer un
-        // cycle trop tot donne des mots nuls -> poids a zero (deja diagnostique le 31/07).
         {READ, T_RCD+CAS+4'd1}: begin
             data_ready <= 1'b0;
-            rd_word[31:0]   <= dq_in;
-        end
-        {READ, T_RCD+CAS+4'd2}: rd_word[63:32]  <= dq_in;
-        {READ, T_RCD+CAS+4'd3}: rd_word[95:64]  <= dq_in;
-        {READ, T_RCD+CAS+4'd4}: begin
-            rd_word[127:96] <= dq_in;
-            // rd_full combine les 3 mots deja enregistres et dq_in (le 4e).
-            dout_buf   <= rd_full[addr_buf[3:0]*8  +: 8];
-            dout32_buf <= rd_full[addr_buf[3:2]*32 +: 32];
-            rd_waddr   <= addr_buf[22:4];
+            dout_buf <= next_dout;
+            // Capture du mot pour le read shadow-word. DOIT se faire ICI et pas au
+            // cycle T_RCD+CAS : `data_ready <= 1` pose la-bas n'est visible qu'au
+            // cycle suivant, et c'est ici que dq_in porte la donnee (meme cycle que
+            // dout_buf). Capturer un cycle trop tot donne un mot nul -> poids a zero.
+            rd_word    <= dq_in;
+            rd_waddr   <= addr_buf[22:2];
             rd_valid   <= 1'b1;
+            dout32_buf <= dq_in;
             busy <= 0;
             state <= IDLE;
         end

@@ -56,30 +56,14 @@ module sdram_chip #(
     reg [31:0] rd_word;
     reg [3:0]  rd_cnt;     // counts down to the data-valid cycle (0 = idle)
 
-    // ---- BURST de lecture (BURST_RD mots consecutifs par CMD_Read) --------------
-    // sdram.v programme BURST_LEN=4 dans le mode register depuis le 31/07 : un
-    // CMD_Read sort 4 mots sur 4 cycles consecutifs a partir de CAS. Sans ce
-    // support, ce modele ne rendait QUE le premier mot et les 3 suivants
-    // arrivaient a zero (bus relache) -> poids faux, mismatch qui accuserait a
-    // tort le controleur. En mode sequentiel l'adresse wrappe A L'INTERIEUR du
-    // bloc aligne de BURST_RD mots : seuls les 2 bits bas de la colonne tournent.
-    parameter BURST_RD = 4;
-    reg [IDX_BITS-1:0] burst_base;
-    reg [1:0]          burst_i;
-    reg                burst_run;
-    wire [IDX_BITS-1:0] burst_idx = {burst_base[IDX_BITS-1:2],
-                                     burst_base[1:0] + burst_i};
-
     reg [2:0] cmd;
     reg [IDX_BITS-1:0] idx;
 
     integer i;
     initial begin
-        dq_oe     = 1'b0;
-        dq_out    = 32'b0;
-        rd_cnt    = 4'd0;
-        burst_i   = 2'd0;
-        burst_run = 1'b0;
+        dq_oe  = 1'b0;
+        dq_out = 32'b0;
+        rd_cnt = 4'd0;
         for (i = 0; i < 4; i = i + 1) active_row[i] = {ROW_BITS{1'b0}};
     end
 
@@ -110,30 +94,20 @@ module sdram_chip #(
             end
 
             CMD_Read: begin
-                idx        = {SDRAM_BA, active_row[SDRAM_BA], SDRAM_A[COL_BITS-1:0]};
-                burst_base <= idx;
-                rd_word    <= mem[idx];
-                rd_cnt     <= CAS[3:0];
-                burst_i    <= 2'd0;
+                idx     = {SDRAM_BA, active_row[SDRAM_BA], SDRAM_A[COL_BITS-1:0]};
+                rd_word <= mem[idx];
+                rd_cnt  <= CAS[3:0];
             end
         endcase
 
-        // read-data output pipeline : 1er mot a CAS, puis BURST_RD-1 mots suivants
-        // sur les cycles consecutifs.
+        // read-data output pipeline
         if (rd_cnt > 4'd1) begin
             rd_cnt <= rd_cnt - 4'd1;
             dq_oe  <= 1'b0;
         end else if (rd_cnt == 4'd1) begin
-            rd_cnt    <= 4'd0;
-            dq_out    <= rd_word;
-            dq_oe     <= 1'b1;        // drive data on this cycle (= read + CAS)
-            burst_i   <= 2'd1;
-            burst_run <= (BURST_RD > 1);
-        end else if (burst_run) begin
-            dq_out    <= mem[burst_idx];
-            dq_oe     <= 1'b1;
-            burst_i   <= burst_i + 2'd1;
-            if (burst_i == BURST_RD[1:0] - 2'd1) burst_run <= 1'b0;
+            rd_cnt <= 4'd0;
+            dq_out <= rd_word;
+            dq_oe  <= 1'b1;        // drive data on this cycle (= read + CAS)
         end else begin
             dq_oe  <= 1'b0;        // release the bus
         end
