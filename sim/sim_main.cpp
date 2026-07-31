@@ -183,6 +183,22 @@ int main(int argc, char** argv) {
         uint8_t stc = top->dbg_st & 0x3F;
         static uint8_t st_d = 0xFF;
         uint16_t nst = top->dbg_node_state & 0x1FF;
+        // Trace des transitions du NODE (pas seulement du seq), fenetree : sans borne
+        // le log exploserait (des millions de transitions). NODE_TRACE_FROM = cycle a
+        // partir duquel tracer, passe par env pour ne pas rebuild a chaque fenetre.
+        {
+            static uint64_t trace_from = [] {
+                const char* e = std::getenv("NODE_TRACE_FROM");
+                return e ? strtoull(e, nullptr, 0) : (uint64_t)-1;
+            }();
+            static uint16_t nst_d = 0xFFFF;
+            if (wd >= trace_from && nst != nst_d) {
+                printf("  [node] wd=%llu nst=%u (was %u) seq_st=%u ph=%u\n",
+                       (unsigned long long)wd, (unsigned)nst, (unsigned)nst_d,
+                       (unsigned)stc, (unsigned)(top->dbg_phase & 0xF));
+                nst_d = nst;
+            }
+        }
         if (stc != st_d) {
             printf("wd=%llu st=%u ph=%u idx=%llu nst=%u (was %u)\n", (unsigned long long)wd,
                    (unsigned)stc, (unsigned)(top->dbg_phase & 0xF),
