@@ -52,19 +52,32 @@ module sdram_chip #(
     reg        dq_oe;
     assign SDRAM_DQ = dq_oe ? dq_out : 32'bz;
 
-    // read-data delay line (CAS cycles)
-    reg [31:0] rd_word;
-    reg [3:0]  rd_cnt;     // counts down to the data-valid cycle (0 = idle)
+    // ---- pipeline de lecture ----------------------------------------------------
+    // Une vraie SDRAM accepte UN READ PAR CYCLE et rend chaque donnee en pipeline :
+    // c'est ce qui permet de lire N mots d'une meme ligne en N cycles au lieu de N
+    // activations. L'ancien modele n'avait qu'un registre (rd_word + compteur) :
+    // deux READ rapproches ecrasaient le premier et un seul mot sortait -- il ne
+    // modelisait donc QUE l'acces isole.
+    //
+    // CALAGE : mesure silicium (host/bench_sdram.py, mots lus vs tok_emb attendu),
+    // un READ emis au cycle N met sa donnee sur DQ au cycle N+2. L'ancien modele
+    // la sortait en N+3 ; l'ecart etait invisible en mono-READ car le bus CONSERVE
+    // la derniere valeur, mais il fausse tout des qu'on pipeline.
+    reg [31:0] rd_pipe [0:3];
+    reg [3:0]  rd_pvld;
 
     reg [2:0] cmd;
     reg [IDX_BITS-1:0] idx;
 
     integer i;
     initial begin
-        dq_oe  = 1'b0;
-        dq_out = 32'b0;
-        rd_cnt = 4'd0;
-        for (i = 0; i < 4; i = i + 1) active_row[i] = {ROW_BITS{1'b0}};
+        dq_oe   = 1'b0;
+        dq_out  = 32'b0;
+        rd_pvld = 4'b0;
+        for (i = 0; i < 4; i = i + 1) begin
+            active_row[i] = {ROW_BITS{1'b0}};
+            rd_pipe[i]    = 32'b0;
+        end
     end
 
     // Préchargement des poids du modèle en simulation. cocotb/icarus ne
@@ -93,23 +106,26 @@ module sdram_chip #(
                 if (!SDRAM_DQM[3]) mem[idx][31:24] <= SDRAM_DQ[31:24];
             end
 
-            CMD_Read: begin
-                idx     = {SDRAM_BA, active_row[SDRAM_BA], SDRAM_A[COL_BITS-1:0]};
-                rd_word <= mem[idx];
-                rd_cnt  <= CAS[3:0];
-            end
+            CMD_Read: idx = {SDRAM_BA, active_row[SDRAM_BA], SDRAM_A[COL_BITS-1:0]};
         endcase
 
-        // read-data output pipeline
-        if (rd_cnt > 4'd1) begin
-            rd_cnt <= rd_cnt - 4'd1;
-            dq_oe  <= 1'b0;
-        end else if (rd_cnt == 4'd1) begin
-            rd_cnt <= 4'd0;
-            dq_out <= rd_word;
-            dq_oe  <= 1'b1;        // drive data on this cycle (= read + CAS)
+        // Pipeline : un etage par cycle. L'etage CAS-2 pilote DQ, ce qui place la
+        // donnee d'un READ emis au cycle N sur le bus au cycle N+2 (cf calage sur
+        // la mesure silicium, en tete de module). Le bus n'est relache que lorsque
+        // plus aucune donnee n'est en vol -- comme une vraie puce, il CONSERVE la
+        // derniere valeur entre deux rafales.
+        for (i = 3; i > 0; i = i - 1) begin
+            rd_pipe[i] <= rd_pipe[i-1];
+            rd_pvld[i] <= rd_pvld[i-1];
+        end
+        rd_pipe[0] <= (cmd == CMD_Read) ? mem[idx] : 32'b0;
+        rd_pvld[0] <= (cmd == CMD_Read);
+
+        if (rd_pvld[CAS-2]) begin
+            dq_out <= rd_pipe[CAS-2];
+            dq_oe  <= 1'b1;
         end else begin
-            dq_oe  <= 1'b0;        // release the bus
+            dq_oe  <= 1'b0;
         end
     end
 endmodule
