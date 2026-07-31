@@ -246,9 +246,36 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > | commandes reçues corrompues | trace du dispatch | ❌ toutes valides (`M`, `F`, `S`) |
 > | `pf_armed` survit à la fin d'un matmul | sonde `[PF FUITE]` en début de matmul | ❌ 0 occurrence |
 >
-> **Piste restante pour la reprise** : le node émet-il le bon **nombre d'octets** en réponse ?
-> Le décalage étant en amont du dispatch, instrumenter le compteur d'émission (`S_TX_M1` /
-> `S_TX_O_RD`) et comparer, opération par opération, avec un run sans prefetch.
+> **Comparaison menée** (run avec prefetch vs référence sans, sonde sur `out_n` à chaque fin
+> d'émission `S_TX_O_W`) :
+>
+> | | émissions | verdict |
+> |---|---|---|
+> | référence sans prefetch | **1034** | PASS 11/11 |
+> | avec prefetch | **851** | bloque |
+>
+> **Les 851 émissions sont RIGOUREUSEMENT IDENTIQUES** à la référence — mêmes tailles, même
+> ordre, mêmes `op_sel`. Le node traite donc correctement 851 opérations, puis cesse de
+> répondre à la 852ᵉ. Ce n'est **pas** une dérive progressive.
+>
+> **Point de rupture localisé** : les émissions 850 et 851 sont les **seules** de tout le run
+> avec `out_n=32` — ce sont les matmuls **K et V** (32 = `CFG_KVW` = `KH*HS`). Juste après,
+> `gen_seq` enchaîne sur l'écriture du KV cache en SDRAM (états `KVWR_*`). La 852ᵉ opération
+> (un matmul 256) ne démarre jamais.
+>
+> Hypothèses supplémentaires éliminées **par mesure** à ce stade :
+>
+> | hypothèse | test | verdict |
+> |---|---|---|
+> | le node émet un nombre d'octets erroné | sonde `out_n` + diff vs référence | ❌ 851/851 identiques |
+> | perte d'octets par débordement du FIFO TX | lecture de `tx8_link` | ❌ backpressure correcte (`ph=1: if (!i_full)`) |
+> | dispatch lisant `rx_byte` sans `rx_pending` | lecture des états `S_M2_*` | ❌ tous gardés par `rx_pending` |
+> | accès prefetché en vol en fin d'opération | sonde `[PF EN VOL]` sur `fm_row==fm_N-1` | ❌ 0 occurrence |
+>
+> **Angle pour la reprise** : toutes les hypothèses côté `node_top` sont tombées. Instrumenter
+> **`gen_seq`** entre les émissions 851 et 852 — il y passe par `KVWR_KB/KD/VB/VD` puis
+> `E_MREQ`, et c'est là qu'il cesse d'envoyer une commande exploitable. Le node, lui, reçoit
+> bien `M` mais pas le second `M` attendu par `S_M2_M`.
 >
 > ⚠ **Piège de durée** : quand la sim bloque, le TB tourne jusqu'à `SIM_CYCLE_CAP` (800 M à
 > dim256) alors que le blocage est à 68 M — **30 min perdues par run**. Debugger avec
