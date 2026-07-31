@@ -115,6 +115,28 @@ de dimensionnement pour tinyllamas (`dim=512`).
 > logique ne croît qu'en `D`. Lever le mur LUT rend dim=256 **possible, pas rapide**
 > (~0,7 tok/s contre 14 tok/s à dim=64).
 >
+> ### ✅ Debit double par les optimisations SDRAM (31/07)
+> Le contrôleur relisait le même mot 32 bits une fois par octet : la SDRAM renvoie 4 octets
+> par accès, mais l'interface est en octets et le datapath streame les poids avec `addr+1`.
+> Deux correctifs (`src/sdram.v` + boucle de fetch `node_top`) :
+> **read shadow-word** (garde le dernier mot lu) puis **consommation des 4 octets d'un seul
+> accès** (`dout32b`, `w32`).
+>
+> | palier | cycles/token avant | après | gain |
+> |---|---|---|---|
+> | dim64 (17 tok) | 28,90 M | **21,44 M** | −25,8 % |
+> | dim128 (17 tok) | 164,37 M | **85,79 M** | −47,8 % |
+> | **dim256** | **35,71 M** | **18,12 M** | **−49,3 %** |
+>
+> dim256 : **9,3 → 4,74 cycles par octet** de poids, **0,88 → 1,72 tok/s**. Confirmé sur
+> **silicium** : 1,15 s → **0,58 s par token** (×1,98, conforme au ×1,96 simulé), 17/17
+> bit-exact en boot autonome. dim64 gagne moins car 66 % de ses poids viennent déjà du
+> cache BRAM (`CFG_NC=5`), chemin non modifié.
+>
+> Goulot restant : ~2 cycles de FSM par octet même sans accès mémoire. Prochains leviers :
+> prefetch (masquer le fetch derrière les 4 étages du pipeline `mac18`) ou `wbuf` en 32 bits
+> pour écrire les 4 octets en un cycle.
+>
 > ### ⚠ Le goulot n'est PAS le DSP — mesure du 30/07
 > Une version antérieure de ce document recommandait de « paralléliser le MAC, 77 % des DSP
 > étant libres ». **C'est faux.** Un MAC séquentiel consomme **1 octet de poids par cycle** ;
